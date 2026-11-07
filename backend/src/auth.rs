@@ -87,7 +87,9 @@ impl FromRequestParts<AppState> for SupabaseClaims {
             ApiError::Unauthorized("Authorization header must be Bearer <token>".into())
         })?;
 
-        verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
+        let claims = verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
+            .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))?;
+        if !claims.is_user_or_service() {
             .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))
     }
 }
