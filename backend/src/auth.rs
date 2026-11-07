@@ -38,6 +38,9 @@ impl SupabaseClaims {
     }
 
     /// A real signed-in user, or the service role. Rejects the public anon key,
+    /// which carries no user identity.
+    pub fn is_user_or_service(&self) -> bool {
+        !self.sub.is_nil() || self.is_service_role()
     }
 
     pub fn is_expired(&self) -> bool {
