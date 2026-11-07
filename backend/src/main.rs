@@ -1,14 +1,26 @@
+pub mod api_keys;
 pub mod auth;
+pub mod billing;
 pub mod config;
 pub mod db;
+pub mod error;
+pub mod gotrue;
+pub mod jobs;
+pub mod metrics;
+pub mod rate_limit;
+pub mod realtime;
+pub mod rls;
 pub mod routes;
+pub mod state;
+pub mod storage;
+pub mod vector;
+pub mod workspaces;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{config::AppConfig, db::create_pool, routes::AppState};
+use crate::{config::AppConfig, db::create_pool, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
