@@ -112,10 +112,11 @@ cat <<EOF
 ===============================================================================
 Supabase project initialized in: ${TARGET_DIR}
 
-Generated Credentials (also saved in ${TARGET_DIR}/.env):
-  DASHBOARD_PASSWORD : ${DASH_PASS}
-  POSTGRES_PASSWORD  : ${POSTGRES_PASS}
-  JWT_SECRET         : ${JWT_SEC}
+Generated credentials (stored in ${ENV_FILE}, mode 600):
+  DASHBOARD_PASSWORD : $(get_env DASHBOARD_PASSWORD)
+  POSTGRES_PASSWORD  : $(get_env POSTGRES_PASSWORD)
+  POOLER_TENANT_ID   : $(get_env POOLER_TENANT_ID)
+  JWT_SECRET, ANON_KEY and SERVICE_ROLE_KEY were regenerated together.
 
 Next Steps:
   1. Review ${TARGET_DIR}/.env and set SITE_URL & API_EXTERNAL_URL to your VPS IP or domain.
