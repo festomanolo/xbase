@@ -14,10 +14,9 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release \
     && rm -rf src target/release/deps/xbase_backend* target/release/xbase-backend*
 
-COPY Cargo.toml Cargo.lock* ./
-COPY src ./src
-
-RUN cargo build --release
+COPY migrations /app/migrations
+COPY backend/src ./src
+RUN cargo build --release && strip target/release/xbase-backend
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
