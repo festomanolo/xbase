@@ -119,8 +119,10 @@ Generated credentials (stored in ${ENV_FILE}, mode 600):
   JWT_SECRET, ANON_KEY and SERVICE_ROLE_KEY were regenerated together.
 
 Next Steps:
-  1. Review ${TARGET_DIR}/.env and set SITE_URL & API_EXTERNAL_URL to your VPS IP or domain.
-  2. Start Supabase:
+  1. Review ${ENV_FILE}: SITE_URL, API_EXTERNAL_URL, SUPABASE_PUBLIC_URL and SMTP_*
+     (without SMTP, GoTrue cannot send confirmation / magic-link / reset emails).
+  2. Optional OAuth providers: see docker/supabase-auth.override.yml.
+  3. Start Supabase:
        cd ${TARGET_DIR}
        sudo docker compose pull
        sudo docker compose up -d
