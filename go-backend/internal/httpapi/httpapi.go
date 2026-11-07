@@ -256,3 +256,89 @@ func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		defer rows.Close()
+		for rows.Next() {
+			ws, err := scanWorkspace(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, ws)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) createWorkspace(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" || len([]rune(name)) > 120 {
+		writeError(w, http.StatusBadRequest, "bad_request", "name must be 1-120 characters")
+		return
+	}
+	claims := claimsFrom(r)
+	var ws Workspace
+	err := db.WithRLS(r.Context(), s.pool, claims, func(tx pgx.Tx) error {
+		var err error
+		ws, err = scanWorkspace(tx.QueryRow(r.Context(),
+			"insert into xbase.workspaces (app_slug, name, owner_id) values ($1, $2, $3::uuid) returning "+workspaceColumns,
+			s.cfg.AppID, name, claims.Subject))
+		return err
+	})
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, ws)
+}
+
+func (s *Server) getWorkspace(w http.ResponseWriter, r *http.Request) {
+	var ws Workspace
+	err := db.WithRLS(r.Context(), s.pool, claimsFrom(r), func(tx pgx.Tx) error {
+		var err error
+		ws, err = scanWorkspace(tx.QueryRow(r.Context(),
+			"select "+workspaceColumns+" from xbase.workspaces where id = $1::uuid and app_slug = $2",
+			r.PathValue("id"), s.cfg.AppID))
+		return err
+	})
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ws)
+}
+
+// whoami authenticates an x-api-key created by the Rust backend.
+func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(r.Header.Get(auth.APIKeyHeader))
+	if auth.APIKeyPrefix(raw) == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Missing or malformed x-api-key")
+		return
+	}
+	var keyID, workspaceID string
+	var scopes []string
+	err := s.pool.QueryRow(r.Context(), `
+		select id::text, workspace_id::text, scopes from xbase.api_keys
+		 where key_hash = $1 and app_slug = $2 and revoked_at is null
+		   and (expires_at is null or expires_at > now())`,
+		auth.HashAPIKey(raw), s.cfg.AppID).Scan(&keyID, &workspaceID, &scopes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid, expired or revoked API key")
+		return
+	}
+	if err != nil {
+		dbError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": keyID, "workspace_id": workspaceID, "scopes": scopes})
+}
