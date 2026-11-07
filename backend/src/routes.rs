@@ -189,6 +189,12 @@ mod tests {
                 .body(Body::empty())
                 .unwrap(),
         )
+        .await;
+        // Admin gate passed; GoTrue is not running in unit tests.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn rate_limiter_returns_429_when_exhausted() {
         let mut config = AppConfig::for_tests();
         config.rate_limit_burst = 2.0;
