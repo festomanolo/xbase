@@ -3,7 +3,17 @@ set -euo pipefail
 
 # =============================================================================
 # xbase — Self-Hosted Supabase Bootstrap Script
-# Clones official Supabase Docker configuration and generates secure secrets.
+# Clones the official Supabase Docker configuration and generates secrets,
+# including ANON_KEY / SERVICE_ROLE_KEY signed with the NEW JWT secret.
+#
+# Usage:
+#   ./scripts/bootstrap-supabase.sh [target-dir]
+#
+# Optional environment variables (applied to the generated .env):
+#   DOMAIN=api.example.com          sets SUPABASE_PUBLIC_URL / API_EXTERNAL_URL (https)
+#   SITE_URL=https://app.example.com
+#   SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_ADMIN_EMAIL SMTP_SENDER_NAME
+#                                   production email (Resend, SES, Postmark, ...)
 # =============================================================================
 
 TARGET_DIR="${1:-supabase-project}"
