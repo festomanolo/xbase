@@ -41,6 +41,7 @@ echo "==> [3/5] Copying Docker Compose files into '$TARGET_DIR'..."
 mkdir -p "$TARGET_DIR"
 cp -rf "$TMP_CLONE/supabase/docker/." "$TARGET_DIR"
 cp "$TARGET_DIR/.env.example" "$TARGET_DIR/.env"
+ENV_FILE="$TARGET_DIR/.env"
 
 echo "==> [4/4] Generating cryptographically strong secrets in '$TARGET_DIR/.env'..."
 POSTGRES_PASS="$(openssl rand -hex 24)"
