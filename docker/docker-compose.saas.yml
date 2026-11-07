@@ -8,6 +8,46 @@
 # giving each a unique APP_ID, container_name and Caddy route.
 # =============================================================================
 
+x-rust-backend: &rust-backend
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  image: xbase-backend:latest
+  restart: unless-stopped
+  expose:
+    - "3000"
+  networks:
+    - default
+    - supabase_default
+  deploy:
+    resources:
+      limits:
+        memory: 64M
+  healthcheck:
+    test: ["CMD-SHELL", "exit 0"]
+    interval: 30s
+
+x-rust-env: &rust-env
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  # Request traffic: Supavisor transaction pooler on port 6543 (NOT direct 5432)
+  DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
+  # Migrations + realtime LISTEN/NOTIFY: direct session connection
+  DIRECT_DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres"
+  RUN_MIGRATIONS: "true"
+  DB_MAX_CONNECTIONS: "5"
+  SUPABASE_JWT_SECRET: "${JWT_SECRET}"
+  SUPABASE_URL: "http://kong:8000"
+  SUPABASE_PUBLIC_URL: "${API_EXTERNAL_URL:-http://localhost:8000}"
+  SUPABASE_ANON_KEY: "${ANON_KEY}"
+  SUPABASE_SERVICE_ROLE_KEY: "${SERVICE_ROLE_KEY}"
+  TRUST_PROXY_HEADERS: "true"
+  RATE_LIMIT_PER_SECOND: "20"
+  RATE_LIMIT_BURST: "60"
+  JOBS_ENABLED: "true"
+  REALTIME_ENABLED: "true"
+  RUST_LOG: "xbase_backend=info,tower_http=info"
+
 services:
   caddy:
     image: caddy:2-alpine
