@@ -104,7 +104,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 48M
 
 networks:
   supabase_default:
