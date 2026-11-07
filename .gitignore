@@ -1,0 +1,20 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+!backend/.env.example
+
+# Self-hosted Supabase runtime data & cloned docker volume data
+supabase-project/
+supabase/volumes/db/data/
+supabase/volumes/storage/
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

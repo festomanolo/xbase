@@ -1,0 +1,24 @@
+# =============================================================================
+# xbase Production Caddyfile
+# Automatically provisions Let's Encrypt TLS certificates for Supabase & SaaS APIs
+# =============================================================================
+
+# 1. Self-Hosted Supabase API & Studio Gateway (Kong)
+api.yourdomain.com {
+    encode zstd gzip
+
+    reverse_proxy kong:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+# 2. High-Performance Rust SaaS Backend #1
+app1-api.yourdomain.com {
+    encode zstd gzip
+
+    reverse_proxy saas-api-1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}

@@ -1,0 +1,55 @@
+# =============================================================================
+# xbase — Multi-SaaS Rust Backends + Caddy Reverse Proxy
+# Connects to the self-hosted Supabase network and Supavisor pooler (port 6543)
+# =============================================================================
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: xbase-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - default
+      - supabase_default
+
+  saas-api-1:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: xbase-saas-api-1
+    restart: unless-stopped
+    environment:
+      APP_ID: "saas-app-1"
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      # Connect via Supavisor transaction pooler on port 6543 (NOT direct 5432)
+      DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
+      DB_MAX_CONNECTIONS: "5"
+      SUPABASE_JWT_SECRET: "${JWT_SECRET}"
+      SUPABASE_URL: "http://kong:8000"
+      RUST_LOG: "xbase_backend=info,tower_http=info"
+    expose:
+      - "3000"
+    networks:
+      - default
+      - supabase_default
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+networks:
+  supabase_default:
+    external: true
+
+volumes:
+  caddy_data:
+  caddy_config:
