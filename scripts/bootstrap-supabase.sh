@@ -56,12 +56,56 @@ set_env() {
   rm -f "$ENV_FILE.bak"
 }
 
-sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${POSTGRES_PASS}|" "$TARGET_DIR/.env"
-sed -i.bak "s|^JWT_SECRET=.*|JWT_SECRET=${JWT_SEC}|" "$TARGET_DIR/.env"
-sed -i.bak "s|^DASHBOARD_PASSWORD=.*|DASHBOARD_PASSWORD=${DASH_PASS}|" "$TARGET_DIR/.env"
-sed -i.bak "s|^SECRET_KEY_BASE=.*|SECRET_KEY_BASE=${SECRET_BASE}|" "$TARGET_DIR/.env"
-sed -i.bak "s|^VAULT_ENC_KEY=.*|VAULT_ENC_KEY=${VAULT_KEY}|" "$TARGET_DIR/.env"
-rm -f "$TARGET_DIR/.env.bak"
+get_env() { grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2-; }
+
+b64url() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
+
+sign_jwt() {
+  local payload="$1" secret="$2" header body sig
+  header="$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)"
+  body="$(printf '%s' "$payload" | b64url)"
+  sig="$(printf '%s' "$header.$body" | openssl dgst -binary -sha256 -hmac "$secret" | b64url)"
+  printf '%s.%s.%s' "$header" "$body" "$sig"
+}
+
+echo "==> [4/5] Generating cryptographically strong secrets..."
+if [ -f "$TARGET_DIR/utils/generate-keys.sh" ]; then
+  # Upstream generator: JWT secret, matching ANON/SERVICE_ROLE keys, and every
+  # other service secret (vault, realtime, pg-meta, logflare, s3, minio).
+  (cd "$TARGET_DIR" && sh utils/generate-keys.sh --update-env >/dev/null)
+  rm -f "$ENV_FILE.old"
+else
+  JWT_SEC="$(openssl rand -base64 36 | tr -d '\n=/+' | cut -c1-40)"
+  IAT="$(date +%s)"
+  EXP=$((IAT + 5 * 365 * 24 * 3600))
+  set_env JWT_SECRET "$JWT_SEC"
+  set_env ANON_KEY "$(sign_jwt "{\"role\":\"anon\",\"iss\":\"supabase\",\"iat\":$IAT,\"exp\":$EXP}" "$JWT_SEC")"
+  set_env SERVICE_ROLE_KEY "$(sign_jwt "{\"role\":\"service_role\",\"iss\":\"supabase\",\"iat\":$IAT,\"exp\":$EXP}" "$JWT_SEC")"
+  set_env POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+  set_env DASHBOARD_PASSWORD "$(openssl rand -hex 16)"
+  set_env SECRET_KEY_BASE "$(openssl rand -base64 48 | tr -d '\n')"
+  set_env VAULT_ENC_KEY "$(openssl rand -hex 16)"
+fi
+
+# Unique Supavisor tenant id (used in postgres.<tenant>@supavisor:6543 URLs).
+set_env POOLER_TENANT_ID "xbase-$(openssl rand -hex 4)"
+
+echo "==> [5/5] Applying optional domain / SMTP settings..."
+if [ -n "${DOMAIN:-}" ]; then
+  set_env SUPABASE_PUBLIC_URL "https://${DOMAIN}"
+  set_env API_EXTERNAL_URL "https://${DOMAIN}"
+fi
+[ -n "${SITE_URL:-}" ] && set_env SITE_URL "$SITE_URL"
+for var in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_ADMIN_EMAIL SMTP_SENDER_NAME; do
+  if [ -n "${!var:-}" ]; then
+    set_env "$var" "${!var}"
+  fi
+done
+if [ -n "${SMTP_HOST:-}" ]; then
+  # Real SMTP configured: require email confirmation.
+  set_env ENABLE_EMAIL_AUTOCONFIRM "false"
+fi
+chmod 600 "$ENV_FILE"
 
 cat <<EOF
 
