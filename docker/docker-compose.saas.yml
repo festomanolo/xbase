@@ -65,6 +65,7 @@ services:
       - default
       - supabase_default
 
+  # --- SaaS #1: Rust (full platform API) ------------------------------------
   saas-api-1:
     build:
       context: ../backend
