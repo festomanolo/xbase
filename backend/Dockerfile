@@ -1,5 +1,9 @@
 # =============================================================================
-# Multi-stage Dockerfile for ultra-low memory (<15MB idle) Rust SaaS backend
+# Multi-stage Dockerfile for ultra-low memory (<15MB idle) Rust SaaS backend.
+#
+# Build context must be the REPOSITORY ROOT (migrations/ is embedded into the
+# binary by sqlx::migrate!):
+#   docker build -f backend/Dockerfile -t xbase-backend .
 # =============================================================================
 FROM rust:1.83-slim-bookworm AS builder
 
