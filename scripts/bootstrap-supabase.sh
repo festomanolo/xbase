@@ -37,7 +37,7 @@ trap 'rm -rf "$TMP_CLONE"' EXIT
 echo "==> [2/5] Shallow-cloning official supabase/supabase repository..."
 git clone --depth 1 https://github.com/supabase/supabase "$TMP_CLONE/supabase"
 
-echo "==> [3/4] Copying Docker Compose files into '$TARGET_DIR'..."
+echo "==> [3/5] Copying Docker Compose files into '$TARGET_DIR'..."
 mkdir -p "$TARGET_DIR"
 cp -rf "$TMP_CLONE/supabase/docker/." "$TARGET_DIR"
 cp "$TARGET_DIR/.env.example" "$TARGET_DIR/.env"
