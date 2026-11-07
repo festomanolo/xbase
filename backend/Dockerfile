@@ -19,7 +19,8 @@ COPY backend/src ./src
 RUN cargo build --release && strip target/release/xbase-backend
 
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/target/release/xbase-backend /usr/local/bin/xbase-backend
