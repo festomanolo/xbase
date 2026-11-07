@@ -67,6 +67,20 @@ services:
 
   # --- SaaS #1: Rust (full platform API) ------------------------------------
   saas-api-1:
+    <<: *rust-backend
+    container_name: xbase-saas-api-1
+    environment:
+      <<: *rust-env
+      APP_ID: "saas-app-1"
+      CORS_ALLOWED_ORIGINS: "https://app1.yourdomain.com"
+      STRIPE_WEBHOOK_SECRET: "${SAAS1_STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRICE_PLANS: "${SAAS1_STRIPE_PRICE_PLANS:-}"
+      EMBEDDING_API_URL: "${EMBEDDING_API_URL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      METRICS_TOKEN: "${METRICS_TOKEN:-}"
+
+  # --- SaaS #2: Go (lean template, same DB conventions) ---------------------
+  saas-api-2:
     build:
       context: ../backend
       dockerfile: Dockerfile
