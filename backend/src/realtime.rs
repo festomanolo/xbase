@@ -216,6 +216,9 @@ async fn ws_handler(
         .ok_or_else(|| ApiError::Unauthorized("access_token query parameter required".into()))?;
     let claims = verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
         .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))?;
+    if claims.sub.is_nil() {
+        return Err(ApiError::Unauthorized("A signed-in user token is required".into()));
+    }
 
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
