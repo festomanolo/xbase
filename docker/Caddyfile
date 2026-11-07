@@ -30,7 +30,7 @@ api.yourdomain.com {
 
 # 2. High-Performance Rust SaaS Backend #1 (WebSockets at /ws are proxied automatically)
 app1-api.yourdomain.com {
-    encode zstd gzip
+    import saas_backend
 
     reverse_proxy saas-api-1:3000 {
         header_up Host {host}
