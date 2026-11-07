@@ -240,6 +240,12 @@ pub mod tests {
             &Header::new(Algorithm::HS256),
             &serde_json::json!({"role": "anon", "exp": 4_102_444_800u64}),
             &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        assert!(!verify_supabase_jwt(&anon, secret).unwrap().is_user_or_service());
+    }
+
+    #[test]
     fn rejects_wrong_secret() {
         let token = sign("super-secret-jwt-key-with-at-least-32-bytes!", Uuid::new_v4(), "authenticated");
         assert!(verify_supabase_jwt(&token, "another-secret-that-is-at-least-32-bytes").is_err());
