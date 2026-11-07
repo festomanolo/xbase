@@ -170,3 +170,89 @@ func (s *statusRecorder) WriteHeader(code int) {
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rec.status, "duration", time.Since(start))
+	})
+}
+
+func (s *Server) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			allowed := len(s.cfg.CORSAllowedOrigins) == 0 || slices.Contains(s.cfg.CORSAllowedOrigins, "*") ||
+				slices.Contains(s.cfg.CORSAllowedOrigins, origin)
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Api-Key")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// --- handlers -------------------------------------------------------------
+
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok", "service": "xbase-go-backend", "app_id": s.cfg.AppID,
+		"pooler_mode": "supavisor_transaction_6543",
+	})
+}
+
+func (s *Server) healthDB(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var one int
+	if err := s.pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "disconnected", "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "connected", "probe": one})
+}
+
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	c := claimsFrom(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id": c.Subject, "email": c.Email, "role": c.Role,
+		"app_metadata": c.Raw["app_metadata"], "user_metadata": c.Raw["user_metadata"],
+	})
+}
+
+type Workspace struct {
+	ID                 string     `json:"id"`
+	AppSlug            string     `json:"app_slug"`
+	Name               string     `json:"name"`
+	OwnerID            string     `json:"owner_id"`
+	Plan               string     `json:"plan"`
+	SubscriptionStatus *string    `json:"subscription_status"`
+	CurrentPeriodEnd   *time.Time `json:"current_period_end"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+const workspaceColumns = `id::text, app_slug, name, owner_id::text, plan, subscription_status,
+	current_period_end, created_at, updated_at`
+
+func scanWorkspace(row pgx.Row) (Workspace, error) {
+	var ws Workspace
+	err := row.Scan(&ws.ID, &ws.AppSlug, &ws.Name, &ws.OwnerID, &ws.Plan,
+		&ws.SubscriptionStatus, &ws.CurrentPeriodEnd, &ws.CreatedAt, &ws.UpdatedAt)
+	return ws, err
+}
+
+func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
+	out := []Workspace{}
+	err := db.WithRLS(r.Context(), s.pool, claimsFrom(r), func(tx pgx.Tx) error {
+		rows, err := tx.Query(r.Context(),
+			"select "+workspaceColumns+" from xbase.workspaces where app_slug = $1 order by created_at desc", s.cfg.AppID)
+		if err != nil {
+			return err
+		}
