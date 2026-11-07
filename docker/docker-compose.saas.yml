@@ -82,9 +82,9 @@ services:
   # --- SaaS #2: Go (lean template, same DB conventions) ---------------------
   saas-api-2:
     build:
-      context: ../backend
-      dockerfile: Dockerfile
-    container_name: xbase-saas-api-1
+      context: ../go-backend
+    image: xbase-go-backend:latest
+    container_name: xbase-saas-api-2
     restart: unless-stopped
     environment:
       APP_ID: "saas-app-1"
