@@ -5,19 +5,12 @@ edition = "2021"
 description = "High-performance Rust (Axum + SQLx) backend for self-hosted Supabase multi-SaaS VPS deployments"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws", "macros"] }
 dotenvy = "0.15"
 jsonwebtoken = "9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "uuid",
-    "chrono",
-    "macros",
-] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "macros", "migrate", "json"] }
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
