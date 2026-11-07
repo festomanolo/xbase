@@ -41,3 +41,47 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer pool.Close()
+
+	limiter := ratelimit.New(cfg.RateLimitPerSecond, cfg.RateLimitBurst)
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				limiter.Sweep()
+			}
+		}
+	}()
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           httpapi.New(cfg, pool, limiter).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("starting xbase Go backend (Supavisor pooled mode)", "app_id", cfg.AppID, "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+	slog.Info("shutdown signal received, draining connections")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
