@@ -84,3 +84,89 @@ func dbError(w http.ResponseWriter, err error) {
 	}
 	slog.Error("database error", "error", err)
 	writeError(w, http.StatusInternalServerError, "internal_error", "Internal server error")
+}
+
+func claimsFrom(r *http.Request) *auth.Claims {
+	c, _ := r.Context().Value(claimsKey).(*auth.Claims)
+	return c
+}
+
+// --- middleware -----------------------------------------------------------
+
+func (s *Server) requireUser(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := auth.BearerToken(r)
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Missing Authorization: Bearer <token>")
+			return
+		}
+		claims, err := auth.Verify(token, s.cfg.JWTSecret)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), claimsKey, claims)))
+	})
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxyHeaders {
+		if ip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); ip != "" {
+			return ip
+		}
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+				return strings.TrimSpace(first)
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func (s *Server) rateKey(r *http.Request) string {
+	if p := auth.APIKeyPrefix(r.Header.Get(auth.APIKeyHeader)); p != "" {
+		return "key:" + p
+	}
+	if t := auth.BearerToken(r); t != "" {
+		if c, err := auth.Verify(t, s.cfg.JWTSecret); err == nil {
+			return "user:" + c.Subject
+		}
+	}
+	return "ip:" + s.clientIP(r)
+}
+
+func (s *Server) rateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/health") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ok, remaining, retry := s.limiter.Allow(s.rateKey(r))
+		w.Header().Set("X-Ratelimit-Limit", strconv.Itoa(s.limiter.Burst()))
+		w.Header().Set("X-Ratelimit-Remaining", strconv.Itoa(remaining))
+		if !ok {
+			secs := max(int(retry.Seconds()), 1)
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
