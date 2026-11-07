@@ -3,6 +3,21 @@
 # Automatically provisions Let's Encrypt TLS certificates for Supabase & SaaS APIs
 # =============================================================================
 
+(saas_backend) {
+    encode zstd gzip
+
+    # Prometheus metrics stay internal (scraped over the Docker network).
+    @metrics path /metrics
+    respond @metrics 404
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}
+
 # 1. Self-Hosted Supabase API & Studio Gateway (Kong)
 api.yourdomain.com {
     encode zstd gzip
