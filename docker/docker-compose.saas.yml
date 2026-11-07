@@ -1,6 +1,11 @@
 # =============================================================================
 # xbase — Multi-SaaS Rust/Go Backends + Caddy Reverse Proxy
 # Connects to the self-hosted Supabase network and Supavisor pooler (port 6543)
+#
+#   docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
+#
+# Add SaaS #3..#10 by copying the `saas-api-1` block (YAML anchor below),
+# giving each a unique APP_ID, container_name and Caddy route.
 # =============================================================================
 
 services:
