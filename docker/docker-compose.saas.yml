@@ -86,6 +86,8 @@ services:
     image: xbase-go-backend:latest
     container_name: xbase-saas-api-2
     restart: unless-stopped
+    depends_on:
+      - saas-api-1 # Rust backend applies the shared migrations
     environment:
       APP_ID: "saas-app-1"
       HOST: "0.0.0.0"
