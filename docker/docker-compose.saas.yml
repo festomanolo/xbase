@@ -92,7 +92,6 @@ services:
       APP_ID: "saas-app-2"
       HOST: "0.0.0.0"
       PORT: "3000"
-      # Connect via Supavisor transaction pooler on port 6543 (NOT direct 5432)
       DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
       DB_MAX_CONNECTIONS: "5"
       SUPABASE_JWT_SECRET: "${JWT_SECRET}"
