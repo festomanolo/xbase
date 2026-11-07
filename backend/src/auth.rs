@@ -1,25 +1,43 @@
 use axum::{
     async_trait,
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
+    http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::routes::AppState;
+use crate::{
+    api_keys::{self, ApiKeyPrincipal},
+    error::ApiError,
+    state::AppState,
+};
 
-/// Standard Supabase GoTrue JWT claims.
+/// Standard Supabase GoTrue JWT claims. Unknown claims (app_metadata,
+/// user_metadata, aal, session_id, ...) are preserved in `extra` so the full
+/// claim set can be forwarded to Postgres for RLS (`auth.jwt()`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupabaseClaims {
     pub sub: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     pub role: String,
     pub exp: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iat: Option<usize>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl SupabaseClaims {
+    pub fn is_service_role(&self) -> bool {
+        self.role == "service_role"
+    }
+
+    pub fn is_expired(&self) -> bool {
+        (self.exp as i64) < chrono::Utc::now().timestamp()
+    }
 }
 
 pub fn verify_supabase_jwt(
@@ -28,6 +46,7 @@ pub fn verify_supabase_jwt(
 ) -> Result<SupabaseClaims, jsonwebtoken::errors::Error> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_aud = false;
+    validation.leeway = 5;
 
     let token_data = decode::<SupabaseClaims>(
         token,
