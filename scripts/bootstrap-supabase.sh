@@ -18,7 +18,7 @@ set -euo pipefail
 
 TARGET_DIR="${1:-supabase-project}"
 
-echo "==> [1/4] Checking dependencies (git, openssl, docker)..."
+echo "==> [1/5] Checking dependencies (git, openssl)..."
 for cmd in git openssl; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Error: '$cmd' is required but not installed." >&2
