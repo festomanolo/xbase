@@ -90,7 +90,9 @@ impl FromRequestParts<AppState> for SupabaseClaims {
         let claims = verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
             .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))?;
         if !claims.is_user_or_service() {
-            .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))
+            return Err(ApiError::Unauthorized("A signed-in user token is required".into()));
+        }
+        Ok(claims)
     }
 }
 
