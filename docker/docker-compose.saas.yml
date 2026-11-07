@@ -23,9 +23,6 @@ x-rust-backend: &rust-backend
     resources:
       limits:
         memory: 64M
-  healthcheck:
-    test: ["CMD-SHELL", "exit 0"]
-    interval: 30s
 
 x-rust-env: &rust-env
   HOST: "0.0.0.0"
