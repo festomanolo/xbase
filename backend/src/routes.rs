@@ -183,6 +183,12 @@ mod tests {
         let app = build_router(state);
         let (status, _, _) = call(
             app,
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
     async fn rate_limiter_returns_429_when_exhausted() {
         let mut config = AppConfig::for_tests();
         config.rate_limit_burst = 2.0;
