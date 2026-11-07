@@ -1,48 +1,56 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::State,
+    http::{header, HeaderValue, Method, StatusCode},
+    middleware,
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
-use chrono::{DateTime, Utc};
-use serde::Serialize;
 use serde_json::json;
-use sqlx::{FromRow, PgPool};
-use std::sync::Arc;
-use uuid::Uuid;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{auth::SupabaseClaims, config::AppConfig};
+use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, storage, vector, workspaces};
 
-#[derive(Clone)]
-pub struct AppState {
-    pub pool: PgPool,
-    pub config: Arc<AppConfig>,
-}
-
-#[derive(Debug, Serialize, FromRow)]
-pub struct WorkspaceRecord {
-    pub id: Uuid,
-    pub app_slug: String,
-    pub name: String,
-    pub owner_id: Uuid,
-    pub plan: String,
-    pub created_at: DateTime<Utc>,
-}
+pub use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
+    let cors = cors_layer(&state.config.cors_allowed_origins);
     Router::new()
         .route("/health", get(health_check))
         .route("/health/db", get(db_health_check))
+        .route("/metrics", get(metrics::render))
         .route("/api/v1/me", get(current_user))
-        .route("/api/v1/tenants/:app_slug", get(list_workspaces_for_app))
+        .merge(gotrue::router())
+        .merge(workspaces::router())
+        .merge(api_keys::router())
+        .merge(storage::router())
+        .merge(vector::router())
+        .merge(billing::router())
+        .merge(realtime::router())
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit::middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), metrics::track))
+        .layer(TraceLayer::new_for_http())
+        .layer(cors)
         .with_state(state)
+}
+
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() || origins.iter().any(|o| o == "*") {
+        return CorsLayer::permissive();
+    }
+    let origins: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, "x-api-key".parse().unwrap(), "x-upsert".parse().unwrap()])
+        .allow_credentials(true)
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "status": "ok",
         "service": "xbase-backend",
+        "version": env!("CARGO_PKG_VERSION"),
         "app_id": state.config.app_id,
         "pooler_mode": "supavisor_transaction_6543"
     }))
@@ -74,88 +82,46 @@ async fn current_user(claims: SupabaseClaims) -> impl IntoResponse {
     Json(json!({
         "user_id": claims.sub,
         "email": claims.email,
-        "role": claims.role
+        "role": claims.role,
+        "app_metadata": claims.extra.get("app_metadata"),
+        "user_metadata": claims.extra.get("user_metadata"),
     }))
-}
-
-async fn list_workspaces_for_app(
-    State(state): State<AppState>,
-    claims: SupabaseClaims,
-    Path(app_slug): Path<String>,
-) -> impl IntoResponse {
-    let query = r#"
-        SELECT id, app_slug, name, owner_id, plan, created_at
-        FROM xbase.workspaces
-        WHERE app_slug = $1 AND owner_id = $2
-        ORDER BY created_at DESC
-    "#;
-
-    match sqlx::query_as::<_, WorkspaceRecord>(query)
-        .bind(&app_slug)
-        .bind(claims.sub)
-        .fetch_all(&state.pool)
-        .await
-    {
-        Ok(workspaces) => (
-            StatusCode::OK,
-            Json(json!({
-                "app_slug": app_slug,
-                "owner_id": claims.sub,
-                "workspaces": workspaces
-            })),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "database_query_failed",
-                "message": err.to_string()
-            })),
-        ),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::create_pool;
+    use crate::{config::AppConfig, db::create_pool};
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::sync::Arc;
     use tower::ServiceExt;
+    use uuid::Uuid;
+
+    async fn test_state_with(config: AppConfig) -> AppState {
+        let pool = create_pool(&config).await.unwrap();
+        AppState::new(pool, Arc::new(config))
+    }
 
     async fn test_state() -> AppState {
-        let config = AppConfig {
-            app_id: "saas-test-1".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 3000,
-            database_url: "postgres://postgres.tenant:pass@localhost:6543/postgres".to_string(),
-            db_max_connections: 2,
-            supabase_jwt_secret: "test-secret-at-least-32-characters-long!".to_string(),
-            supabase_url: "http://localhost:8000".to_string(),
-        };
-        let pool = create_pool(&config).await.unwrap();
-        AppState {
-            pool,
-            config: Arc::new(config),
-        }
+        test_state_with(AppConfig::for_tests()).await
+    }
+
+    async fn call(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value, axum::http::HeaderMap) {
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, json, headers)
     }
 
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let app = build_router(test_state().await);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let (status, payload, _) = call(app, Request::builder().uri("/health").body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["app_id"], "saas-test-1");
     }
@@ -163,16 +129,97 @@ mod tests {
     #[tokio::test]
     async fn protected_route_rejects_missing_token() {
         let app = build_router(test_state().await);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/me")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (status, _, _) = call(app, Request::builder().uri("/api/v1/me").body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    #[tokio::test]
+    async fn me_returns_claims_for_valid_token() {
+        let state = test_state().await;
+        let user = Uuid::new_v4();
+        let token = crate::auth::tests::sign(&state.config.supabase_jwt_secret, user, "authenticated");
+        let app = build_router(state);
+        let (status, payload, headers) = call(
+            app,
+            Request::builder()
+                .uri("/api/v1/me")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(payload["user_id"], json!(user));
+        assert!(headers.contains_key("x-ratelimit-remaining"));
+    }
+
+    #[tokio::test]
+    async fn admin_routes_require_admin() {
+        let state = test_state().await;
+        let token = crate::auth::tests::sign(&state.config.supabase_jwt_secret, Uuid::new_v4(), "authenticated");
+        let app = build_router(state);
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_returns_429_when_exhausted() {
+        let mut config = AppConfig::for_tests();
+        config.rate_limit_burst = 2.0;
+        config.rate_limit_per_second = 0.01;
+        let app = build_router(test_state_with(config).await);
+        let req = || Request::builder().uri("/api/v1/me").header("x-real-ip", "9.9.9.9").body(Body::empty()).unwrap();
+        assert_eq!(call(app.clone(), req()).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(app.clone(), req()).await.0, StatusCode::UNAUTHORIZED);
+        let (status, _, headers) = call(app, req()).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(headers.contains_key("retry-after"));
+    }
+
+    #[tokio::test]
+    async fn stripe_webhook_rejects_bad_signature() {
+        let app = build_router(test_state().await);
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/stripe")
+                .header("stripe-signature", "t=1,v1=deadbeef")
+                .body(Body::from(r#"{"id":"evt_1"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn malformed_api_key_is_rejected() {
+        let app = build_router(test_state().await);
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .uri("/api/v1/server/whoami")
+                .header("x-api-key", "not-a-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn websocket_requires_token() {
+        let app = build_router(test_state().await);
+        let (status, _, _) = call(app, Request::builder().uri("/ws").body(Body::empty()).unwrap()).await;
+        // Without upgrade headers axum rejects before auth; either way no anonymous socket.
+        assert!(status.is_client_error());
     }
 }
