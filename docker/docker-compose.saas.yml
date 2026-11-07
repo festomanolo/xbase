@@ -89,7 +89,7 @@ services:
     depends_on:
       - saas-api-1 # Rust backend applies the shared migrations
     environment:
-      APP_ID: "saas-app-1"
+      APP_ID: "saas-app-2"
       HOST: "0.0.0.0"
       PORT: "3000"
       # Connect via Supavisor transaction pooler on port 6543 (NOT direct 5432)
