@@ -229,6 +229,12 @@ pub mod tests {
         let token = encode(
             &Header::new(Algorithm::HS256),
             &serde_json::json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let claims = verify_supabase_jwt(&token, secret).unwrap();
+        assert!(claims.sub.is_nil() && claims.is_service_role() && claims.is_user_or_service());
+        assert!(serde_json::to_value(&claims).unwrap().get("sub").is_none());
     fn rejects_wrong_secret() {
         let token = sign("super-secret-jwt-key-with-at-least-32-bytes!", Uuid::new_v4(), "authenticated");
         assert!(verify_supabase_jwt(&token, "another-secret-that-is-at-least-32-bytes").is_err());
