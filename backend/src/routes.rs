@@ -171,6 +171,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_role_key_passes_admin_gate() {
+        let state = test_state().await;
+        // Supabase service_role keys carry no `sub` claim.
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
     async fn rate_limiter_returns_429_when_exhausted() {
         let mut config = AppConfig::for_tests();
         config.rate_limit_burst = 2.0;
