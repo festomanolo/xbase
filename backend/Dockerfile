@@ -8,8 +8,11 @@
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /app/backend
 
-WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+# Cache dependency compilation separately from application code.
+COPY backend/Cargo.toml backend/Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release \
+    && rm -rf src target/release/deps/xbase_backend* target/release/xbase-backend*
 
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
