@@ -22,8 +22,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY --from=builder /app/target/release/xbase-backend /usr/local/bin/xbase-backend
+COPY --from=builder /app/backend/target/release/xbase-backend /usr/local/bin/xbase-backend
 
 USER 1000:1000
 EXPOSE 3000
