@@ -224,6 +224,11 @@ pub mod tests {
     }
 
     #[test]
+    fn accepts_service_role_key_without_sub() {
+        let secret = "super-secret-jwt-key-with-at-least-32-bytes!";
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
     fn rejects_wrong_secret() {
         let token = sign("super-secret-jwt-key-with-at-least-32-bytes!", Uuid::new_v4(), "authenticated");
         assert!(verify_supabase_jwt(&token, "another-secret-that-is-at-least-32-bytes").is_err());
