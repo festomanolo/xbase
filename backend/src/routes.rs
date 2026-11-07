@@ -1,42 +1,49 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::State,
+    http::{header, HeaderValue, Method, StatusCode},
+    middleware,
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
-use chrono::{DateTime, Utc};
-use serde::Serialize;
 use serde_json::json;
-use sqlx::{FromRow, PgPool};
-use std::sync::Arc;
-use uuid::Uuid;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{auth::SupabaseClaims, config::AppConfig};
+use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, storage, vector, workspaces};
 
-#[derive(Clone)]
-pub struct AppState {
-    pub pool: PgPool,
-    pub config: Arc<AppConfig>,
-}
-
-#[derive(Debug, Serialize, FromRow)]
-pub struct WorkspaceRecord {
-    pub id: Uuid,
-    pub app_slug: String,
-    pub name: String,
-    pub owner_id: Uuid,
-    pub plan: String,
-    pub created_at: DateTime<Utc>,
-}
+pub use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
+    let cors = cors_layer(&state.config.cors_allowed_origins);
     Router::new()
         .route("/health", get(health_check))
         .route("/health/db", get(db_health_check))
+        .route("/metrics", get(metrics::render))
         .route("/api/v1/me", get(current_user))
-        .route("/api/v1/tenants/:app_slug", get(list_workspaces_for_app))
+        .merge(gotrue::router())
+        .merge(workspaces::router())
+        .merge(api_keys::router())
+        .merge(storage::router())
+        .merge(vector::router())
+        .merge(billing::router())
+        .merge(realtime::router())
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit::middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), metrics::track))
+        .layer(TraceLayer::new_for_http())
+        .layer(cors)
         .with_state(state)
+}
+
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() || origins.iter().any(|o| o == "*") {
+        return CorsLayer::permissive();
+    }
+    let origins: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, "x-api-key".parse().unwrap(), "x-upsert".parse().unwrap()])
+        .allow_credentials(true)
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
