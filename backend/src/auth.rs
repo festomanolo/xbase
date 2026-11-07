@@ -37,6 +37,9 @@ impl SupabaseClaims {
         self.role == "service_role"
     }
 
+    /// A real signed-in user, or the service role. Rejects the public anon key,
+    }
+
     pub fn is_expired(&self) -> bool {
         (self.exp as i64) < chrono::Utc::now().timestamp()
     }
