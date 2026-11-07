@@ -37,3 +37,18 @@ app1-api.yourdomain.com {
         header_up X-Real-IP {remote_host}
     }
 }
+
+# 3. Go SaaS Backend #2
+app2-api.yourdomain.com {
+    import saas_backend
+
+    reverse_proxy saas-api-2:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+# 4. Grafana (optional, from docker-compose.monitoring.yml)
+# grafana.yourdomain.com {
+#     reverse_proxy xbase-grafana:3000
+# }
