@@ -43,12 +43,18 @@ cp -rf "$TMP_CLONE/supabase/docker/." "$TARGET_DIR"
 cp "$TARGET_DIR/.env.example" "$TARGET_DIR/.env"
 ENV_FILE="$TARGET_DIR/.env"
 
-echo "==> [4/4] Generating cryptographically strong secrets in '$TARGET_DIR/.env'..."
-POSTGRES_PASS="$(openssl rand -hex 24)"
-JWT_SEC="$(openssl rand -base64 36 | tr -d '\n=/+' | cut -c1-40)"
-DASH_PASS="$(openssl rand -hex 16)"
-SECRET_BASE="$(openssl rand -base64 48 | tr -d '\n')"
-VAULT_KEY="$(openssl rand -hex 16)"
+# Portable in-place "KEY=value" replacement (GNU + BSD sed). Values are
+# escaped for sed so secrets containing / & | are safe.
+set_env() {
+  local key="$1" value="$2" escaped
+  escaped="$(printf '%s' "$value" | sed -e 's/[\/&|]/\\&/g')"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    sed -i.bak "s|^${key}=.*|${key}=${escaped}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+  rm -f "$ENV_FILE.bak"
+}
 
 sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${POSTGRES_PASS}|" "$TARGET_DIR/.env"
 sed -i.bak "s|^JWT_SECRET=.*|JWT_SECRET=${JWT_SEC}|" "$TARGET_DIR/.env"
