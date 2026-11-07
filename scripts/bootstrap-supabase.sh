@@ -126,6 +126,9 @@ Next Steps:
        cd ${TARGET_DIR}
        sudo docker compose pull
        sudo docker compose up -d
-  3. Point your Rust/Go SaaS backends to Supavisor on port 6543.
+  4. Start the xbase SaaS backends:
+       cd docker
+       sudo docker compose --env-file ../${TARGET_DIR}/.env -f docker-compose.saas.yml up -d --build
+  5. Schedule backups:   sudo ./scripts/install-backups.sh
 ===============================================================================
 EOF
