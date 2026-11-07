@@ -1,5 +1,5 @@
 # =============================================================================
-# xbase — Multi-SaaS Rust Backends + Caddy Reverse Proxy
+# xbase — Multi-SaaS Rust/Go Backends + Caddy Reverse Proxy
 # Connects to the self-hosted Supabase network and Supavisor pooler (port 6543)
 # =============================================================================
 
