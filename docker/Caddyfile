@@ -28,7 +28,7 @@ api.yourdomain.com {
     }
 }
 
-# 2. High-Performance Rust SaaS Backend #1
+# 2. High-Performance Rust SaaS Backend #1 (WebSockets at /ws are proxied automatically)
 app1-api.yourdomain.com {
     encode zstd gzip
 
