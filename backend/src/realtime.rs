@@ -216,6 +216,9 @@ async fn ws_handler(
         .ok_or_else(|| ApiError::Unauthorized("access_token query parameter required".into()))?;
     let claims = verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
         .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))?;
+    if claims.sub.is_nil() {
+        return Err(ApiError::Unauthorized("A signed-in user token is required".into()));
+    }
 
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
@@ -309,7 +312,7 @@ async fn run_connection(state: AppState, claims: SupabaseClaims, mut socket: Web
                 match change {
                     Ok(ev) => {
                         let relevant = ev.workspace_id.is_some_and(|w| conn.workspaces.contains(&w))
-                            && ev.app_slug.as_deref().map_or(true, |a| a == state.config.app_id);
+                            && ev.app_slug.as_deref().is_none_or(|a| a == state.config.app_id);
                         if relevant {
                             let mut msg = json!({ "type": "change", "schema": ev.schema, "table": ev.table, "op": ev.op, "workspace_id": ev.workspace_id });
                             for (k, v) in &ev.rest { msg[k] = v.clone(); }

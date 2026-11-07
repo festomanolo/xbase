@@ -1,0 +1,30 @@
+# Prometheus scrape config for xbase. Add one target per SaaS backend.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: containers
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # Rust SaaS backends expose /metrics on the shared Docker network.
+  # If METRICS_TOKEN is set, uncomment `authorization`.
+  - job_name: xbase-backends
+    metrics_path: /metrics
+    # authorization:
+    #   credentials: change-me-metrics-token
+    static_configs:
+      - targets: ["saas-api-1:3000"]

@@ -1,7 +1,49 @@
 # =============================================================================
-# xbase — Multi-SaaS Rust Backends + Caddy Reverse Proxy
+# xbase — Multi-SaaS Rust/Go Backends + Caddy Reverse Proxy
 # Connects to the self-hosted Supabase network and Supavisor pooler (port 6543)
+#
+#   docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
+#
+# Add SaaS #3..#10 by copying the `saas-api-1` block (YAML anchor below),
+# giving each a unique APP_ID, container_name and Caddy route.
 # =============================================================================
+
+x-rust-backend: &rust-backend
+  build:
+    context: ..
+    dockerfile: backend/Dockerfile
+  image: xbase-backend:latest
+  restart: unless-stopped
+  expose:
+    - "3000"
+  networks:
+    - default
+    - supabase_default
+  deploy:
+    resources:
+      limits:
+        memory: 64M
+
+x-rust-env: &rust-env
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  # Request traffic: Supavisor transaction pooler on port 6543 (NOT direct 5432)
+  DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
+  # Migrations + realtime LISTEN/NOTIFY: direct session connection
+  DIRECT_DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres"
+  RUN_MIGRATIONS: "true"
+  DB_MAX_CONNECTIONS: "5"
+  SUPABASE_JWT_SECRET: "${JWT_SECRET}"
+  SUPABASE_URL: "http://kong:8000"
+  SUPABASE_PUBLIC_URL: "${API_EXTERNAL_URL:-http://localhost:8000}"
+  SUPABASE_ANON_KEY: "${ANON_KEY}"
+  SUPABASE_SERVICE_ROLE_KEY: "${SERVICE_ROLE_KEY}"
+  TRUST_PROXY_HEADERS: "true"
+  RATE_LIMIT_PER_SECOND: "20"
+  RATE_LIMIT_BURST: "60"
+  JOBS_ENABLED: "true"
+  REALTIME_ENABLED: "true"
+  RUST_LOG: "xbase_backend=info,tower_http=info"
 
 services:
   caddy:
@@ -20,22 +62,37 @@ services:
       - default
       - supabase_default
 
+  # --- SaaS #1: Rust (full platform API) ------------------------------------
   saas-api-1:
-    build:
-      context: ../backend
-      dockerfile: Dockerfile
+    <<: *rust-backend
     container_name: xbase-saas-api-1
-    restart: unless-stopped
     environment:
+      <<: *rust-env
       APP_ID: "saas-app-1"
+      CORS_ALLOWED_ORIGINS: "https://app1.yourdomain.com"
+      STRIPE_WEBHOOK_SECRET: "${SAAS1_STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRICE_PLANS: "${SAAS1_STRIPE_PRICE_PLANS:-}"
+      EMBEDDING_API_URL: "${EMBEDDING_API_URL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      METRICS_TOKEN: "${METRICS_TOKEN:-}"
+
+  # --- SaaS #2: Go (lean template, same DB conventions) ---------------------
+  saas-api-2:
+    build:
+      context: ../go-backend
+    image: xbase-go-backend:latest
+    container_name: xbase-saas-api-2
+    restart: unless-stopped
+    depends_on:
+      - saas-api-1 # Rust backend applies the shared migrations
+    environment:
+      APP_ID: "saas-app-2"
       HOST: "0.0.0.0"
       PORT: "3000"
-      # Connect via Supavisor transaction pooler on port 6543 (NOT direct 5432)
       DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
       DB_MAX_CONNECTIONS: "5"
       SUPABASE_JWT_SECRET: "${JWT_SECRET}"
-      SUPABASE_URL: "http://kong:8000"
-      RUST_LOG: "xbase_backend=info,tower_http=info"
+      CORS_ALLOWED_ORIGINS: "https://app2.yourdomain.com"
     expose:
       - "3000"
     networks:
@@ -44,7 +101,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 48M
 
 networks:
   supabase_default:

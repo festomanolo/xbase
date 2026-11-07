@@ -3,6 +3,21 @@
 # Automatically provisions Let's Encrypt TLS certificates for Supabase & SaaS APIs
 # =============================================================================
 
+(saas_backend) {
+    encode zstd gzip
+
+    # Prometheus metrics stay internal (scraped over the Docker network).
+    @metrics path /metrics
+    respond @metrics 404
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}
+
 # 1. Self-Hosted Supabase API & Studio Gateway (Kong)
 api.yourdomain.com {
     encode zstd gzip
@@ -13,12 +28,27 @@ api.yourdomain.com {
     }
 }
 
-# 2. High-Performance Rust SaaS Backend #1
+# 2. High-Performance Rust SaaS Backend #1 (WebSockets at /ws are proxied automatically)
 app1-api.yourdomain.com {
-    encode zstd gzip
+    import saas_backend
 
     reverse_proxy saas-api-1:3000 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
     }
 }
+
+# 3. Go SaaS Backend #2
+app2-api.yourdomain.com {
+    import saas_backend
+
+    reverse_proxy saas-api-2:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+# 4. Grafana (optional, from docker-compose.monitoring.yml)
+# grafana.yourdomain.com {
+#     reverse_proxy xbase-grafana:3000
+# }

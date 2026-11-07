@@ -1,0 +1,60 @@
+# =============================================================================
+# GoTrue (Supabase Auth) override: OAuth providers + production SMTP tuning.
+#
+# Self-hosted Studio has no UI for OAuth/SAML providers; they are configured
+# through environment variables on the `auth` service. Use this file as an
+# extra compose layer from inside supabase-project/:
+#
+#   docker compose -f docker-compose.yml -f ../docker/supabase-auth.override.yml up -d auth
+#
+# Put the referenced secrets (GITHUB_CLIENT_ID, ...) in supabase-project/.env.
+# Each provider's OAuth app must use the callback URL:
+#   ${API_EXTERNAL_URL}/auth/v1/callback
+# Then start the flow from your SaaS backend:
+#   GET https://app1-api.yourdomain.com/api/v1/auth/authorize?provider=github&redirect_to=https://app1.yourdomain.com
+# =============================================================================
+
+services:
+  auth:
+    environment:
+      # --- Redirect allow-list for all 10 SaaS frontends (comma-separated) ---
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
+
+      # --- Production SMTP (values come from .env SMTP_*) ---
+      GOTRUE_SMTP_MAX_FREQUENCY: 30s
+      GOTRUE_RATE_LIMIT_EMAIL_SENT: ${GOTRUE_RATE_LIMIT_EMAIL_SENT:-60}
+
+      # --- Google ---
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: ${GOOGLE_ENABLED:-false}
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_SECRET:-}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: ${API_EXTERNAL_URL}/auth/v1/callback
+
+      # --- GitHub ---
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: ${GITHUB_ENABLED:-false}
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GITHUB_SECRET:-}
+      GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: ${API_EXTERNAL_URL}/auth/v1/callback
+
+      # --- Apple ---
+      GOTRUE_EXTERNAL_APPLE_ENABLED: ${APPLE_ENABLED:-false}
+      GOTRUE_EXTERNAL_APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_APPLE_SECRET: ${APPLE_SECRET:-}
+      GOTRUE_EXTERNAL_APPLE_REDIRECT_URI: ${API_EXTERNAL_URL}/auth/v1/callback
+
+      # --- Microsoft / Azure ---
+      GOTRUE_EXTERNAL_AZURE_ENABLED: ${AZURE_ENABLED:-false}
+      GOTRUE_EXTERNAL_AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_AZURE_SECRET: ${AZURE_SECRET:-}
+      GOTRUE_EXTERNAL_AZURE_REDIRECT_URI: ${API_EXTERNAL_URL}/auth/v1/callback
+
+      # --- Discord ---
+      GOTRUE_EXTERNAL_DISCORD_ENABLED: ${DISCORD_ENABLED:-false}
+      GOTRUE_EXTERNAL_DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_DISCORD_SECRET: ${DISCORD_SECRET:-}
+      GOTRUE_EXTERNAL_DISCORD_REDIRECT_URI: ${API_EXTERNAL_URL}/auth/v1/callback
+
+      # --- SAML SSO (enterprise customers) ---
+      # Generate a key: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 | base64 -w0
+      GOTRUE_SAML_ENABLED: ${SAML_ENABLED:-false}
+      GOTRUE_SAML_PRIVATE_KEY: ${SAML_PRIVATE_KEY:-}

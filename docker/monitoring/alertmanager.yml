@@ -1,0 +1,14 @@
+# Route every alert to one receiver. Swap in email_configs / slack_configs /
+# telegram_configs as needed: https://prometheus.io/docs/alerting/latest/configuration/
+route:
+  receiver: default
+  group_by: [alertname]
+  group_wait: 30s
+  repeat_interval: 4h
+
+receivers:
+  - name: default
+    webhook_configs:
+      # e.g. ntfy.sh, a Discord/Slack bridge, or your own endpoint
+      - url: https://ntfy.sh/change-me-xbase-alerts
+        send_resolved: true

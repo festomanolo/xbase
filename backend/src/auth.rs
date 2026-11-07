@@ -19,6 +19,8 @@ use crate::{
 /// claim set can be forwarded to Postgres for RLS (`auth.jwt()`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupabaseClaims {
+    /// Absent on Supabase's `anon` / `service_role` API keys (decoded as nil).
+    #[serde(default, skip_serializing_if = "Uuid::is_nil")]
     pub sub: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -33,6 +35,12 @@ pub struct SupabaseClaims {
 impl SupabaseClaims {
     pub fn is_service_role(&self) -> bool {
         self.role == "service_role"
+    }
+
+    /// A real signed-in user, or the service role. Rejects the public anon key,
+    /// which carries no user identity.
+    pub fn is_user_or_service(&self) -> bool {
+        !self.sub.is_nil() || self.is_service_role()
     }
 
     pub fn is_expired(&self) -> bool {
@@ -79,8 +87,12 @@ impl FromRequestParts<AppState> for SupabaseClaims {
             ApiError::Unauthorized("Authorization header must be Bearer <token>".into())
         })?;
 
-        verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
-            .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))
+        let claims = verify_supabase_jwt(token, &state.config.supabase_jwt_secret)
+            .map_err(|_| ApiError::Unauthorized("Invalid or expired Supabase JWT".into()))?;
+        if !claims.is_user_or_service() {
+            return Err(ApiError::Unauthorized("A signed-in user token is required".into()));
+        }
+        Ok(claims)
     }
 }
 
@@ -209,6 +221,28 @@ pub mod tests {
         let back = serde_json::to_value(&verified).unwrap();
         assert_eq!(back["app_metadata"]["provider"], "github");
         assert_eq!(back["aal"], "aal1");
+    }
+
+    #[test]
+    fn accepts_service_role_key_without_sub() {
+        let secret = "super-secret-jwt-key-with-at-least-32-bytes!";
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let claims = verify_supabase_jwt(&token, secret).unwrap();
+        assert!(claims.sub.is_nil() && claims.is_service_role() && claims.is_user_or_service());
+        assert!(serde_json::to_value(&claims).unwrap().get("sub").is_none());
+
+        let anon = encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({"role": "anon", "exp": 4_102_444_800u64}),
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        assert!(!verify_supabase_jwt(&anon, secret).unwrap().is_user_or_service());
     }
 
     #[test]

@@ -171,6 +171,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_role_key_passes_admin_gate() {
+        let state = test_state().await;
+        // Supabase service_role keys carry no `sub` claim.
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
+            &jsonwebtoken::EncodingKey::from_secret(state.config.supabase_jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let app = build_router(state);
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .uri("/api/v1/admin/users")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        // Admin gate passed; GoTrue is not running in unit tests.
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn rate_limiter_returns_429_when_exhausted() {
         let mut config = AppConfig::for_tests();
         config.rate_limit_burst = 2.0;

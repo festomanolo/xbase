@@ -1,0 +1,86 @@
+# =============================================================================
+# xbase — Metrics & alerting (Prometheus + Alertmanager + Grafana + exporters)
+#
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# ~250MB RAM total. Scrapes the VPS (node-exporter), every container
+# (cAdvisor) and each SaaS backend's /metrics endpoint. Alerts on disk, RAM,
+# CPU, down targets and 5xx rates. Configure the receiver in
+# monitoring/alertmanager.yml (email, Slack, Discord, Telegram, ntfy...).
+# =============================================================================
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: xbase-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks: [default, supabase_default]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: xbase-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks: [default]
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    container_name: xbase-node-exporter
+    restart: unless-stopped
+    pid: host
+    command:
+      - --path.rootfs=/host
+    volumes:
+      - /:/host:ro,rslave
+    networks: [default]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: xbase-cadvisor
+    restart: unless-stopped
+    privileged: true
+    command:
+      - --housekeeping_interval=30s
+      - --docker_only=true
+      - --store_container_labels=false
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [default]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    container_name: xbase-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+    networks: [default, supabase_default]
+
+networks:
+  default:
+    name: xbase_monitoring
+  supabase_default:
+    external: true
+
+volumes:
+  prometheus_data:
+  grafana_data:

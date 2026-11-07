@@ -1,0 +1,48 @@
+groups:
+  - name: vps
+    rules:
+      - alert: DiskAlmostFull
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) > 0.85
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full"
+      - alert: MemoryPressure
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "RAM usage above 90% for 10 minutes"
+      - alert: HighCPU
+        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU above 90% for 15 minutes"
+
+  - name: services
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+      - alert: ContainerRestarting
+        expr: increase(container_start_time_seconds{name=~".+"}[15m]) > 2
+        labels: { severity: warning }
+        annotations:
+          summary: "Container {{ $labels.name }} restarted repeatedly"
+      - alert: BackendHigh5xxRate
+        expr: |
+          sum by (app) (rate(xbase_http_requests_total{class="5xx"}[5m]))
+            / clamp_min(sum by (app) (rate(xbase_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.app }} returns >5% 5xx responses"
+      - alert: BackgroundJobsFailing
+        expr: increase(xbase_jobs_total{result="failure"}[30m]) > 10
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.app }} background jobs are failing"
