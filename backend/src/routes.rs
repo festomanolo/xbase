@@ -177,6 +177,12 @@ mod tests {
         let token = jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
             &json!({"role": "service_role", "iss": "supabase", "exp": 4_102_444_800u64}),
+            &jsonwebtoken::EncodingKey::from_secret(state.config.supabase_jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let app = build_router(state);
+        let (status, _, _) = call(
+            app,
     async fn rate_limiter_returns_429_when_exhausted() {
         let mut config = AppConfig::for_tests();
         config.rate_limit_burst = 2.0;
