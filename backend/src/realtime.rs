@@ -312,7 +312,7 @@ async fn run_connection(state: AppState, claims: SupabaseClaims, mut socket: Web
                 match change {
                     Ok(ev) => {
                         let relevant = ev.workspace_id.is_some_and(|w| conn.workspaces.contains(&w))
-                            && ev.app_slug.as_deref().map_or(true, |a| a == state.config.app_id);
+                            && ev.app_slug.as_deref().is_none_or(|a| a == state.config.app_id);
                         if relevant {
                             let mut msg = json!({ "type": "change", "schema": ev.schema, "table": ev.table, "op": ev.op, "workspace_id": ev.workspace_id });
                             for (k, v) in &ev.rest { msg[k] = v.clone(); }
