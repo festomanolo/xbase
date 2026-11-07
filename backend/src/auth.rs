@@ -19,6 +19,8 @@ use crate::{
 /// claim set can be forwarded to Postgres for RLS (`auth.jwt()`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupabaseClaims {
+    /// Absent on Supabase's `anon` / `service_role` API keys (decoded as nil).
+    #[serde(default, skip_serializing_if = "Uuid::is_nil")]
     pub sub: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
