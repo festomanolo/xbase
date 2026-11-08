@@ -26,5 +26,9 @@ scrape_configs:
     metrics_path: /metrics
     # authorization:
     #   credentials: change-me-metrics-token
-    static_configs:
-      - targets: ["saas-api-1:3000"]
+    # DNS discovery scrapes every replica of each compose service (autoscaling).
+    dns_sd_configs:
+      - names: ["saas-api-1", "saas-api-2"]
+        type: A
+        port: 3000
+        refresh_interval: 15s
