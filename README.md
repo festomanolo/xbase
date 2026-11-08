@@ -191,9 +191,9 @@ cd ../go-backend && go test ./...
 
 ---
 
-## Part 2: High-Performance Rust/Go Integration for 10+ SaaS Apps
+## Part 3: The Go Template
 
-Using Rust or Go alongside your self-hosted Supabase is an excellent strategy for maximizing performance and minimizing server costs, especially if you plan to run 10 different SaaS applications on a single VPS.
+`go-backend/` provides `/health`, `/health/db`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
 
 In fact, Supabase itself is built for extreme performance using these exact languages: its authentication server (GoTrue) is written in Go, and its Edge Functions runtime (Deno) is built on Rust.
 
