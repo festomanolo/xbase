@@ -29,8 +29,9 @@ xbase/
 │   ├── gotrue.rs     # GoTrue proxy: signup/token/refresh/otp/magiclink/verify/recover/authorize/exchange/user/logout + admin users
 │   ├── workspaces.rs # workspace/member/invitation CRUD (all via begin_rls)
 │   ├── api_keys.rs   # xb_<prefix>_<secret>, SHA-256 hashed, scopes, management endpoints
-│   ├── storage.rs    # Supabase Storage proxy: buckets (admin), signed URLs, streaming objects, TUS, transforms
-│   ├── realtime.rs   # /ws hub: rooms, broadcast, presence, NOTIFY xbase_changes → subscribers
+│   ├── storage.rs    # Supabase Storage proxy: buckets (admin), signed URLs, streaming objects, TUS, transforms; user JWT or API key (confined to <workspace_id>/)
+│   ├── realtime.rs   # /ws hub: rooms, broadcast, presence, NOTIFY xbase_changes → subscribers; REALTIME_CLUSTER fan-out over NOTIFY xbase_rt_<app>
+│   ├── rest.rs       # PostgREST-style CRUD /api/v1/rest/:table (catalog-validated identifiers, bound values, RLS)
 │   ├── vector.rs     # pgvector upsert/search, OpenAI-compatible embeddings, reindex job
 │   ├── billing.rs    # Stripe + LemonSqueezy signature verification → webhook_events → job → plan sync
 │   ├── jobs.rs       # SKIP LOCKED queue, backoff, reaper; add kinds in jobs::dispatch
