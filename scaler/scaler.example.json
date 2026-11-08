@@ -1,0 +1,42 @@
+{
+  "project": "docker",
+  "work_dir": "/opt/xbase/docker",
+  "compose_files": ["docker-compose.saas.yml"],
+  "env_file": "../supabase-project/.env",
+  "interval": "15s",
+  "state_dir": "/run/xbase-scaler",
+  "services": [
+    {
+      "service": "saas-api-1",
+      "binary": "xbase-backend",
+      "min": 1,
+      "max": 4,
+      "cores_per_replica": 1,
+      "cpu_up": 70,
+      "cpu_down": 25,
+      "saturation_up": 0.5,
+      "up_after": "45s",
+      "down_after": "10m",
+      "cooldown": "2m"
+    },
+    {
+      "service": "saas-api-2",
+      "binary": "xbase-go-backend",
+      "min": 1,
+      "max": 3
+    }
+  ],
+  "capacity": {
+    "postgres_max_connections": 100,
+    "reserved_connections": 45,
+    "apps": [
+      { "app_id": "saas-app-1", "backend": "rust", "pool_size": 15, "max_clients": 100, "max_replicas": 4, "db_max_connections": 5 },
+      { "app_id": "saas-app-2", "backend": "go",   "pool_size": 10, "max_clients": 100, "max_replicas": 3, "db_max_connections": 5 }
+    ]
+  },
+  "supavisor": {
+    "api_url": "http://127.0.0.1:4000",
+    "api_secret_env": "API_JWT_SECRET",
+    "db_password_env": "POSTGRES_PASSWORD"
+  }
+}
