@@ -98,6 +98,9 @@ psql_admin() {
 # re-applied on every base backup because the file lives in the container's own
 # filesystem and is lost when the container is recreated.
 ensure_replication_access() {
+  local hba
+  hba="$(psql_admin -c 'show hba_file')"
+  docker exec -u root "$DB_CONTAINER" sh -c \
 # --- ship-wal -----------------------------------------------------------------
 cmd_ship_wal() {
   need_remote
