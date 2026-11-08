@@ -79,8 +79,11 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 2. **Zero-network JWT validation** with `SUPABASE_JWT_SECRET`. `sub` is optional in `SupabaseClaims` because Supabase `anon`/`service_role` keys have none; the extractor rejects sub-less tokens unless role is `service_role`.
 3. **Postgres is the authorization layer.** User-facing queries go through `rls::begin_rls`, never the bare pool. Policies live in migrations; billing/secret columns are protected by column-level grants. Internal tables (`jobs`, `webhook_events`) have RLS on and no policies.
 4. **Everything is scoped by `APP_ID`**: workspaces (`app_slug`), API keys, jobs, webhook events, embeddings, storage buckets (`<APP_ID>-<name>`). Never query those tables without the app predicate.
-5. **API-key principals** bypass RLS (service connection), so handlers must call `Principal::require_workspace_scope` and keep explicit `workspace_id`/`app_slug` predicates.
-6. **Migrations are append-only** (sqlx checksums). Add `000N_*.sql`; never edit applied files. `set_ignore_missing(true)` lets older binaries boot against newer schemas.
+5. **API-key principals** bypass RLS (service connection), so handlers must call `Principal::require_workspace_scope` and keep explicit `workspace_id`/`app_slug` predicates. Storage is the same rule on the file side: a key runs with the service role, so `storage.rs` confines it to `<its workspace_id>/…` and to the `storage:read` / `storage:write` scopes. The generic REST API never accepts keys.
+6. **Object naming convention:** storage objects live at `<workspace_uuid>/<path>` in bucket `<APP_ID>-<name>`. The `storage.objects` policies (migration 0005), the API-key confinement in `storage.rs` and the Go proxy all depend on it.
+7. **Multi-replica rules.** More than one replica of an `APP_ID` requires `RATE_LIMIT_BACKEND=postgres` and `REALTIME_CLUSTER=true` on every replica. Cluster messages must stay under the NOTIFY limit (~7 KB). Jobs, migrations and CDC are already replica-safe (`SKIP LOCKED`, advisory lock, per-replica `LISTEN`).
+8. **REST API safety:** identifiers only ever come from the catalog and are quoted; values are always bound (`($n::text)::<column type>`). `xbase`, `auth`, `storage` and other internals are refused regardless of `REST_SCHEMAS`; PATCH/DELETE require a filter.
+9. **Migrations are append-only** (sqlx checksums). Add `000N_*.sql`; never edit applied files. `set_ignore_missing(true)` lets older binaries boot against newer schemas.
 
 ---
 
