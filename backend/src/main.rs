@@ -78,12 +78,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     {
-        let limiter = state.limiter.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                limiter.sweep();
+                state.limiter.sweep();
+                if state.config.rate_limit_backend == config::RateLimitBackend::Postgres {
+                    rate_limit::sweep_shared(&state).await;
+                }
             }
         });
     }
