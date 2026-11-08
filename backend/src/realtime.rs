@@ -2,7 +2,16 @@
 //! Postgres change data capture (LISTEN/NOTIFY on `xbase_changes`).
 //!
 //! Connect: `GET /ws?access_token=<supabase jwt>` (browsers cannot set headers
-//! on WebSockets). Messages are JSON:
+//! on WebSockets).
+//!
+//! Horizontal scaling (`REALTIME_CLUSTER=true`): rooms are per-process, so every
+//! broadcast / presence change is also published on the Postgres channel
+//! `xbase_rt_<app_id>` and replayed into the rooms of every *other* replica.
+//! Presence is replicated as diffs plus a 30 s full "sync" heartbeat per room;
+//! entries of a replica that stops syncing expire after 90 s. NOTIFY payloads
+//! are capped at ~8 KB, so clustered messages are limited to ~7 KB.
+//!
+//! Messages are JSON:
 //!
 //! client → server
 //!   {"type":"join","room":"lobby"}                 public room
@@ -23,9 +32,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
