@@ -709,6 +709,9 @@ mod tests {
     fn insert_names_only_supplied_columns() {
         let body = json!([{"title": "a"}, {"title": "b", "done": true}]);
         let b = build_insert("public", "todos", &cols(), &body, None, false).unwrap();
+        // different key sets => separate INSERTs, so "done" keeps its DEFAULT for the first row
+        assert!(b.sql.contains(r#"insert into "public"."todos" ("title") select "title" from jsonb_populate_recordset(null::"public"."todos", $1::jsonb)"#), "{}", b.sql);
+        assert!(b.sql.contains(r#"("title", "done") select "title", "done" from jsonb_populate_recordset(null::"public"."todos", $2::jsonb)"#), "{}", b.sql);
         assert!(b.sql.contains(r#"insert into "public"."todos" ("title", "done") select "title", "done" from jsonb_populate_recordset"#), "{}", b.sql);
         assert!(build_insert("public", "todos", &cols(), &json!({"nope": 1}), None, false).is_err());
         assert!(build_insert("public", "todos", &cols(), &json!([]), None, false).is_err());
