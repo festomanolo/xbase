@@ -94,6 +94,10 @@ psql_admin() {
 # The Supabase image's pg_hba.conf has no `replication` rules at all (`all` does not
 # match the replication pseudo-database), so pg_basebackup is refused out of the
 # box. Allow it for the admin role over the container-local socket only, which is
+# the same trust `local all supabase_admin trust` already grants. Idempotent, and
+# re-applied on every base backup because the file lives in the container's own
+# filesystem and is lost when the container is recreated.
+ensure_replication_access() {
 # --- ship-wal -----------------------------------------------------------------
 cmd_ship_wal() {
   need_remote
