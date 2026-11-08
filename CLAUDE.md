@@ -10,11 +10,32 @@
 
 ```text
 xbase/
-├── CLAUDE.md                          # AI/Developer architecture & implementation gap guide
-├── README.md                          # VPS self-hosting setup & Rust/Go integration guide
-├── .env.example                       # Root environment template for Supabase + Rust backend
-├── scripts/
-│   └── bootstrap-supabase.sh          # Shallow-clones supabase/supabase & generates secrets
+├── CLAUDE.md / README.md
+├── .env.example                       # Root env template (Supabase + SMTP + OAuth + backends)
+├── migrations/                        # Embedded via sqlx::migrate!, applied on boot over port 5432
+│   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
+│   ├── 0002_platform_core.sql         # members, invitations, api_keys, jobs, webhook_events, CDC triggers, RLS + grants
+│   └── 0003_vector_embeddings.sql     # pgvector xbase.embeddings (vector(1536), HNSW)
+├── backend/src/                       # Rust (Axum 0.7 + SQLx 0.8 + Tokio)
+│   ├── main.rs       # boot: migrations → pool → register app → job workers → CDC listener → serve
+│   ├── config.rs     # AppConfig (all env vars; AppConfig::for_tests())
+│   ├── state.rs      # AppState { pool, config, http, realtime, limiter, jobs_notify, metrics }
+│   ├── error.rs      # ApiError (sqlx/reqwest mapping: 23505→409, 42501→403, P0001→400 ...)
+│   ├── db.rs         # Supavisor pool (statement_cache_capacity(0)), run_migrations, register_app
+│   ├── rls.rs        # begin_rls / with_rls_claims (set_config role + request.jwt.claims, tx-local)
+│   ├── auth.rs       # SupabaseClaims, UserToken, AdminClaims, Principal (JWT | ApiKey)
+│   ├── gotrue.rs     # GoTrue proxy: signup/token/refresh/otp/magiclink/verify/recover/authorize/exchange/user/logout + admin users
+│   ├── workspaces.rs # workspace/member/invitation CRUD (all via begin_rls)
+│   ├── api_keys.rs   # xb_<prefix>_<secret>, SHA-256 hashed, scopes, management endpoints
+│   ├── storage.rs    # Supabase Storage proxy: buckets (admin), signed URLs, streaming objects, TUS, transforms
+│   ├── realtime.rs   # /ws hub: rooms, broadcast, presence, NOTIFY xbase_changes → subscribers
+│   ├── vector.rs     # pgvector upsert/search, OpenAI-compatible embeddings, reindex job
+│   ├── billing.rs    # Stripe + LemonSqueezy signature verification → webhook_events → job → plan sync
+│   ├── jobs.rs       # SKIP LOCKED queue, backoff, reaper; add kinds in jobs::dispatch
+│   ├── rate_limit.rs # sharded token bucket keyed api-key > user > IP
+│   ├── metrics.rs    # Prometheus text /metrics
+│   └── routes.rs     # build_router + HTTP tests
+├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, rate limit
 ├── docker/
 │   ├── docker-compose.saas.yml        # Multi-SaaS Rust containers + Caddy reverse proxy stack
 │   └── Caddyfile                      # Automatic Let's Encrypt HTTPS routing for Kong & SaaS APIs
