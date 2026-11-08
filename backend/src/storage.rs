@@ -9,8 +9,12 @@
 //!   layout the `storage.objects` policies (migration 0005) use for users.
 //! * Buckets are namespaced per SaaS (`<APP_ID>-<name>`) so ten apps can share
 //!   one Storage service without seeing each other's files.
-//! * Large uploads use the TUS resumable protocol (`/uploads/resumable`), and
-//!   image transformations are applied through signed render URLs.
+//! * Large uploads use the TUS resumable protocol. Users may talk to Storage
+//!   directly (`/uploads/resumable` returns the details); `/storage/tus/:bucket`
+//!   is a TUS proxy that also works with API keys: the creation request is
+//!   confined like any other key write, and the upload URL it hands back carries
+//!   an HMAC binding the upload to that caller, so it cannot be reused by another.
+//! * Image transformations are applied through signed render URLs.
 
 use axum::{
     async_trait,
@@ -44,6 +48,8 @@ pub fn router() -> Router<AppState> {
             get(download_object).put(upload_object).post(upload_object),
         )
         .route("/api/v1/storage/uploads/resumable", post(resumable_upload_info))
+        .route("/api/v1/storage/tus/:bucket", post(tus_create))
+        .route("/api/v1/storage/tus/:bucket/:token", axum::routing::any(tus_forward))
 }
 
 /// Applies the per-app bucket namespace.
@@ -490,14 +496,30 @@ struct ResumableInfo {
 }
 
 /// Connection details for TUS resumable (multipart) uploads, e.g. with
-/// `tus-js-client`. Files stream straight to Storage in 6 MB chunks.
+/// `tus-js-client`. Files stream straight to Storage in 6 MB chunks. API keys get
+/// the proxy endpoint (`/api/v1/storage/tus/:bucket`) instead, since their
+/// credential must not be handed to Storage.
 async fn resumable_upload_info(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Json(body): Json<ResumableInfo>,
 ) -> ApiResult<impl IntoResponse> {
     let id = scoped_bucket(&state.config.app_id, &body.bucket)?;
-    let path = validate_object_path(&body.path)?;
+    let path = caller.object_path(&body.path, Access::Write)?;
+    let path = path.as_str();
+    let user = match caller {
+        Caller::User(u) => u,
+        Caller::Key(_) => {
+            return Ok(Json(json!({
+                "endpoint": format!("/api/v1/storage/tus/{id}"),
+                "protocol": "tus-1.0.0",
+                "chunk_size": 6 * 1024 * 1024,
+                "headers": { "x-upsert": body.upsert.to_string() },
+                "auth": "send your x-api-key header on every TUS request",
+                "metadata": { "bucketName": id, "objectName": path },
+            })))
+        }
+    };
     let mut headers = json!({
         "authorization": format!("Bearer {}", user.token),
         "x-upsert": body.upsert.to_string(),
@@ -514,9 +536,200 @@ async fn resumable_upload_info(
     })))
 }
 
+// --- TUS proxy -------------------------------------------------------------
+
+const TUS_VERSION: &str = "1.0.0";
+/// Response headers a TUS client needs to see.
+const TUS_RESPONSE_HEADERS: [&str; 7] =
+    ["upload-offset", "upload-length", "upload-expires", "tus-resumable", "tus-version", "tus-extension", "cache-control"];
+
+impl Caller {
+    /// The identity an upload URL is bound to.
+    fn tus_principal(&self) -> String {
+        match self {
+            Caller::User(u) => format!("user:{}", u.claims.sub),
+            Caller::Key(k) => format!("key:{}:{}", k.key_id, k.workspace_id),
+        }
+    }
+}
+
+fn tus_mac(secret: &str, app: &str, bucket: &str, upload_id: &str, principal: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("hmac accepts any key");
+    mac.update(format!("tus|{app}|{bucket}|{upload_id}|{principal}").as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// `<base64url(upstream upload id)>.<hmac>` — stateless, so any replica can verify it.
+pub fn tus_token(secret: &str, app: &str, bucket: &str, upload_id: &str, principal: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    format!("{}.{}", URL_SAFE_NO_PAD.encode(upload_id), tus_mac(secret, app, bucket, upload_id, principal))
+}
+
+pub fn tus_verify(secret: &str, app: &str, bucket: &str, token: &str, principal: &str) -> ApiResult<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let bad = || ApiError::forbidden("Invalid upload URL for this caller");
+    let (id_b64, mac) = token.split_once('.').ok_or_else(bad)?;
+    let id = String::from_utf8(URL_SAFE_NO_PAD.decode(id_b64).map_err(|_| bad())?).map_err(|_| bad())?;
+    let want = tus_mac(secret, app, bucket, &id, principal);
+    // constant-time compare
+    let ok = want.len() == mac.len() && want.bytes().zip(mac.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+    if !ok || id.is_empty() || id.contains('/') {
+        return Err(bad());
+    }
+    Ok(id)
+}
+
+/// Parses TUS `Upload-Metadata` (`key base64,key2 base64`).
+pub fn parse_tus_metadata(raw: &str) -> ApiResult<Vec<(String, String)>> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let mut out = Vec::new();
+    for pair in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once(' ').unwrap_or((pair, ""));
+        let v = if v.is_empty() {
+            String::new()
+        } else {
+            String::from_utf8(STANDARD.decode(v.trim()).map_err(|_| ApiError::bad_request("Upload-Metadata is not base64"))?)
+                .map_err(|_| ApiError::bad_request("Upload-Metadata is not UTF-8"))?
+        };
+        out.push((k.to_string(), v));
+    }
+    Ok(out)
+}
+
+fn encode_tus_metadata(pairs: &[(String, String)]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    pairs.iter().map(|(k, v)| format!("{k} {}", STANDARD.encode(v))).collect::<Vec<_>>().join(",")
+}
+
+fn tus_relay(resp: reqwest::Response, location: Option<String>) -> ApiResult<Response> {
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut out = Response::builder().status(status).header("tus-resumable", TUS_VERSION);
+    for h in TUS_RESPONSE_HEADERS {
+        if let Some(v) = resp.headers().get(h) {
+            out = out.header(h, v.as_bytes());
+        }
+    }
+    if let Some(loc) = location {
+        out = out.header(header::LOCATION, loc);
+    }
+    out = out.header("access-control-expose-headers", "Location, Upload-Offset, Upload-Length, Tus-Resumable, Upload-Expires");
+    out.body(Body::from_stream(resp.bytes_stream())).map_err(|e| ApiError::internal(e.to_string()))
+}
+
+/// `POST /api/v1/storage/tus/:bucket` — TUS creation. `Upload-Metadata` must carry
+/// `objectName` (and may carry `contentType`, `cacheControl`); the bucket comes from
+/// the URL. Returns `Location: /api/v1/storage/tus/:bucket/<token>`.
+async fn tus_create(
+    State(state): State<AppState>,
+    caller: Caller,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let id = scoped_bucket(&state.config.app_id, &bucket)?;
+    let length = headers
+        .get("upload-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .ok_or_else(|| ApiError::bad_request("Upload-Length header is required (deferred length is not supported)"))?;
+    let meta = parse_tus_metadata(headers.get("upload-metadata").and_then(|v| v.to_str().ok()).unwrap_or_default())?;
+    let object = meta
+        .iter()
+        .find(|(k, _)| k == "objectName")
+        .map(|(_, v)| v.clone())
+        .ok_or_else(|| ApiError::bad_request("Upload-Metadata must include objectName"))?;
+    let object = caller.object_path(&object, Access::Write)?;
+    let mut forwarded = vec![("bucketName".to_string(), id.clone()), ("objectName".to_string(), object.clone())];
+    forwarded.extend(meta.into_iter().filter(|(k, _)| k == "contentType" || k == "cacheControl"));
+
+    let upsert = headers.get("x-upsert").and_then(|v| v.to_str().ok()).unwrap_or("false") == "true";
+    let url = format!("{}/upload/resumable", state.config.storage_url);
+    let req = state
+        .http
+        .post(url)
+        .header("tus-resumable", TUS_VERSION)
+        .header("upload-length", length.to_string())
+        .header("upload-metadata", encode_tus_metadata(&forwarded))
+        .header("x-upsert", upsert.to_string())
+        .header(header::CONTENT_LENGTH, "0");
+    let resp = authed(&state, req, caller.cred())?.send().await?;
+    if resp.status().as_u16() != 201 {
+        return Err(json_response(resp).await.err().unwrap_or_else(|| ApiError::internal("unexpected TUS response")));
+    }
+    let upstream = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|l| l.trim_end_matches('/').rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::internal("Storage returned no upload Location"))?
+        .to_string();
+    let token = tus_token(&state.config.supabase_jwt_secret, &state.config.app_id, &id, &upstream, &caller.tus_principal());
+    tus_relay(resp, Some(format!("/api/v1/storage/tus/{bucket}/{token}")))
+}
+
+/// `HEAD | PATCH | DELETE /api/v1/storage/tus/:bucket/:token` — offset query, chunk
+/// upload (streamed) and termination, for the caller the token was issued to.
+async fn tus_forward(
+    State(state): State<AppState>,
+    method: Method,
+    caller: Caller,
+    Path((bucket, token)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<Response> {
+    if ![Method::HEAD, Method::PATCH, Method::DELETE].contains(&method) {
+        return Err(ApiError::bad_request("TUS upload URLs accept HEAD, PATCH and DELETE"));
+    }
+    if let Caller::Key(k) = &caller {
+        k.require_scope("storage:write")?;
+    }
+    let id = scoped_bucket(&state.config.app_id, &bucket)?;
+    let upstream = tus_verify(&state.config.supabase_jwt_secret, &state.config.app_id, &id, &token, &caller.tus_principal())?;
+    let url = storage_url(&state.config.storage_url, &["upload", "resumable"], &upstream, None)?;
+    let mut req = state
+        .http
+        .request(reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap(), url)
+        .header("tus-resumable", TUS_VERSION);
+    for h in ["upload-offset", "content-type", "content-length", "upload-checksum"] {
+        if let Some(v) = headers.get(h) {
+            req = req.header(h, v.as_bytes());
+        }
+    }
+    if method == Method::PATCH {
+        req = req.body(reqwest::Body::wrap_stream(body.into_data_stream()));
+    }
+    let resp = authed(&state, req, caller.cred())?.send().await?;
+    tus_relay(resp, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tus_tokens_bind_upload_bucket_and_caller() {
+        let t = tus_token("s3cret", "app1", "app1-docs", "dXBsb2Fk", "key:k1:ws1");
+        // identical to the Go backend (go-backend/internal/httpapi/gaps_test.go)
+        assert_eq!(t, "ZFhCc2IyRms.98fc9672f942b6a33d6cf9c18defbef1fc981002277e87bdd6193f5132100858");
+        assert_eq!(tus_verify("s3cret", "app1", "app1-docs", &t, "key:k1:ws1").unwrap(), "dXBsb2Fk");
+        assert!(tus_verify("s3cret", "app1", "app1-docs", &t, "key:k2:ws1").is_err(), "other caller");
+        assert!(tus_verify("s3cret", "app1", "app1-other", &t, "key:k1:ws1").is_err(), "other bucket");
+        assert!(tus_verify("other", "app1", "app1-docs", &t, "key:k1:ws1").is_err(), "other secret");
+        assert!(tus_verify("s3cret", "app1", "app1-docs", "garbage", "key:k1:ws1").is_err());
+        let (id, mac) = t.split_once('.').unwrap();
+        assert!(tus_verify("s3cret", "app1", "app1-docs", &format!("{id}.{}", &mac[1..]), "key:k1:ws1").is_err());
+    }
+
+    #[test]
+    fn tus_metadata_roundtrip() {
+        let m = parse_tus_metadata("objectName ZGlyL2EucGRm,contentType YXBwbGljYXRpb24vcGRm,flag").unwrap();
+        assert_eq!(m[0], ("objectName".into(), "dir/a.pdf".into()));
+        assert_eq!(m[1].1, "application/pdf");
+        assert_eq!(m[2], ("flag".into(), String::new()));
+        assert_eq!(parse_tus_metadata(&encode_tus_metadata(&m[..2])).unwrap(), m[..2].to_vec());
+        assert!(parse_tus_metadata("objectName !!!").is_err());
+    }
 
     #[test]
     fn buckets_are_namespaced_per_app() {
