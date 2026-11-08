@@ -109,62 +109,11 @@ cd supabase-project
 docker compose -f docker-compose.yml -f ../docker/supabase-auth.override.yml up -d auth
 ```
 
-Or perform the steps manually:
-
-```bash
-# Clone the repository (shallow clone to save space)
-git clone --depth 1 https://github.com/supabase/supabase
-
-# Create your project directory
-mkdir supabase-project
-
-# Copy the docker files (including hidden files) to your project
-cp -rf supabase/docker/. supabase-project
-
-cd supabase-project
-
-# Create the environment file
-cp .env.example .env
-```
-
-### 3. Configure Environment Variables (Crucial for Security)
-
-You must update the default passwords and secrets before starting the server. Open the `.env` file using a terminal text editor like `nano`:
-
-```bash
-nano .env
-```
-
-Update the following core variables:
-
-* `POSTGRES_PASSWORD`: Create a strong database password (alphanumeric recommended to avoid URL encoding issues).
-* `JWT_SECRET`: Generate a secure, 32+ character random string (`openssl rand -base64 32`).
-* `DASHBOARD_USERNAME` & `DASHBOARD_PASSWORD`: Set your login credentials for the Supabase Studio web interface.
-* `SITE_URL` & `API_EXTERNAL_URL`: Set these to your VPS's public IP address (e.g., `http://YOUR_VPS_IP:8000`) or your domain name (e.g., `https://api.yourdomain.com`).
-
-### 4. Start the Supabase Stack
-
-Pull the latest Docker images and start all the backend services in the background.
-
-```bash
-sudo docker compose pull
-sudo docker compose up -d
-```
-
-This process will take a few minutes as it downloads and initializes the containers for PostgreSQL, Auth (GoTrue), Realtime, Storage, Supavisor, and the Studio dashboard.
-
-### 5. Access Supabase Studio
-
-Once the containers are running, you can access your self-hosted dashboard.
-
-Open your web browser and navigate to:
-`http://YOUR_VPS_IP:8000`
-
-Log in using the `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` you configured in Step 3.
+The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callback`. Without `SMTP_*`, GoTrue cannot send confirmation, magic-link or password-reset emails.
 
 ---
 
-### Production Readiness
+## Part 2: The Rust Platform API
 
 By default, this exposes Supabase over plain HTTP. Before deploying a live application, you should:
 
