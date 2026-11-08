@@ -352,7 +352,14 @@ impl RealtimeHub {
             .unwrap_or_else(|| json!({}));
         let diff = json!({ "type": "presence_diff", "room": room, "joins": joins, "leaves": leaves });
         fan_out(r, None, &diff);
+        self.publish_msg(room, diff);
         true
+    }
+
+    fn publish_msg(&self, room: &str, msg: Value) {
+        if let Some(link) = self.cluster.get() {
+            self.publish(&Envelope::Msg { o: self.origin.clone(), app: link.app.clone(), room: room.to_string(), msg });
+        }
     }
 
     pub fn room_count(&self) -> usize {
@@ -360,9 +367,9 @@ impl RealtimeHub {
     }
 }
 
-fn presence_snapshot(room: &Room) -> Value {
-    let presences: serde_json::Map<String, Value> = room
-        .members
+/// Presence held by this replica's own connections.
+fn local_presence(room: &Room) -> serde_json::Map<String, Value> {
+    room.members
         .iter()
         .filter_map(|(id, m)| {
             m.presence
