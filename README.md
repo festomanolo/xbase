@@ -25,7 +25,9 @@ xbase/
 ├── migrations/                        # Embedded into the Rust binary, applied on boot
 │   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
 │   ├── 0002_platform_core.sql         # members, invitations, API keys, jobs, webhooks, CDC triggers, RLS
-│   └── 0003_vector_embeddings.sql     # pgvector embeddings + HNSW index
+│   ├── 0003_vector_embeddings.sql     # pgvector embeddings + HNSW index
+│   ├── 0004_shared_rate_limit.sql     # shared token bucket for multi-replica rate limiting
+│   └── 0005_storage_policies.sql      # workspace-scoped storage.objects policies
 ├── backend/                           # Rust platform API (Axum 0.7, SQLx 0.8, Tokio)
 │   └── src/
 │       ├── main.rs        # boot: migrations, pool, workers, CDC listener, graceful shutdown
@@ -36,19 +38,22 @@ xbase/
 │       ├── gotrue.rs      # sign-up/in, OTP, magic link, OAuth+PKCE, refresh, recovery, admin users
 │       ├── workspaces.rs  # workspace / member / invitation CRUD
 │       ├── api_keys.rs    # hashed x-api-key management + authentication
-│       ├── storage.rs     # buckets, signed URLs, streaming upload/download, TUS, image transforms
-│       ├── realtime.rs    # /ws rooms, broadcast, presence, Postgres change streams
+│       ├── storage.rs     # buckets, signed URLs, streaming upload/download, TUS, transforms; JWT or API key
+│       ├── realtime.rs    # /ws rooms, broadcast, presence, change streams, multi-replica fan-out
+│       ├── rest.rs        # PostgREST-style CRUD under RLS (opt-in)
 │       ├── vector.rs      # pgvector upsert/search, server-side embeddings, reindex job
 │       ├── billing.rs     # Stripe + LemonSqueezy webhooks → workspace plan sync
 │       ├── jobs.rs        # durable SKIP LOCKED job queue with retries/backoff
-│       ├── rate_limit.rs  # sharded token bucket per API key / user / IP
+│       ├── rate_limit.rs  # token bucket per API key / user / IP (memory or shared via Postgres)
 │       ├── metrics.rs     # Prometheus /metrics
 │       └── routes.rs      # router assembly + HTTP tests
-├── go-backend/                        # Go service template (pgx, golang-jwt)
+├── go-backend/                        # Go service: storage, vector, billing, realtime, shared limiter (pgx)
 ├── docker/
 │   ├── docker-compose.saas.yml        # Rust + Go SaaS backends + Caddy
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
 │   ├── supabase-auth.override.yml     # OAuth providers, SAML, SMTP tuning for GoTrue
+│   ├── supabase-pitr.override.yml     # WAL archiving for point-in-time recovery
+│   ├── storage-policies.sql           # storage.objects policies (superuser variant of migration 0005)
 │   ├── monitoring/                    # scrape config, alert rules, receivers
 │   └── Caddyfile
 └── scripts/
@@ -56,6 +61,8 @@ xbase/
     ├── backup-postgres.sh             # encrypted pg_dump → S3 / R2 / B2 (age or openssl + rclone)
     ├── restore-postgres.sh            # verified restore into a fresh database
     ├── install-backups.sh             # nightly systemd timer
+    ├── pitr.sh / install-pitr.sh      # WAL shipping, base backups, point-in-time restore
+    ├── apply-storage-policies.sh      # install storage.objects policies as the DB superuser
     └── db-branch.sh                   # ephemeral per-PR database branches
 ```
 
@@ -138,14 +145,52 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 | **API keys** | `GET/POST /api/v1/workspaces/:id/api-keys`, `DELETE …/api-keys/:key_id` | JWT (owner/admin) |
 | | `GET /api/v1/server/whoami` | `x-api-key` |
 | **Storage** | `GET/POST /api/v1/storage/buckets`, `DELETE …/buckets/:bucket?force=true` | admin |
-| | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT |
-| | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT |
+| | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT or API key |
+| | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT or API key |
 | | `POST /api/v1/storage/uploads/resumable` (TUS / multipart details) | JWT |
+| **REST** (opt-in) | `GET/POST/PATCH/DELETE /api/v1/rest/:table` | JWT |
 | **Realtime** | `GET /ws?access_token=<jwt>` | JWT |
 | **Vector** | `POST /api/v1/workspaces/:id/embeddings` · `…/embeddings/search` · `…/embeddings/reindex`, `DELETE …/embeddings/:id` | JWT or API key |
 | **Billing** | `POST /webhooks/stripe`, `POST /webhooks/lemonsqueezy` | provider signature |
 
 Workspace roles are `owner > admin > member > viewer`. Owners delete the workspace. Owners and admins rename it, manage members, invite people and create API keys. Members write embeddings. Every member can read.
+
+### Storage with API keys and policies
+
+Name objects `<workspace_id>/<path>` inside bucket `<APP_ID>-<name>`. Migration `0005` installs `storage.objects` policies on that convention: workspace members read, owners/admins/members write. If it prints `skipped storage.objects policies` (the migration user does not own the table), run `./scripts/apply-storage-policies.sh` once.
+
+Server-to-server callers use an API key with scope `storage:read` and/or `storage:write` (or `*`). The key runs with the service role, so the backend pins it to its own workspace: any path outside `<its workspace_id>/` is refused, and listings are forced to that folder. Resumable (TUS) uploads stay user-only.
+
+```bash
+curl -X PUT "$API/api/v1/storage/objects/docs/$WORKSPACE_ID/reports/q3.pdf" \
+     -H "x-api-key: $XB_KEY" -H "content-type: application/pdf" --data-binary @q3.pdf
+```
+
+### Generic REST API
+
+Set `REST_ENABLED=true` (and `REST_SCHEMAS`, default `public`) to get PostgREST-style CRUD from the Rust backend. Every request runs under the caller's RLS role, so grants and policies are the authorization layer; `xbase`, `auth`, `storage` and other internal schemas are never reachable.
+
+```bash
+GET    /api/v1/rest/todos?select=id,title&done=eq.false&title=ilike.*milk*&order=created_at.desc&limit=20
+GET    /api/v1/rest/todos?id=in.(1,2,3)&deleted_at=is.null        # Prefer: count=exact → Content-Range
+POST   /api/v1/rest/todos        {"title":"x"}  |  [{"title":"a"},{"title":"b"}]
+POST   /api/v1/rest/todos?on_conflict=id   (Prefer: resolution=merge-duplicates)   # upsert
+PATCH  /api/v1/rest/todos?id=eq.7   {"done":true}            # a filter is mandatory
+DELETE /api/v1/rest/todos?id=eq.7                            # a filter is mandatory
+```
+
+Operators: `eq neq gt gte lt lte like ilike is in`, each negatable with `not.`. Use `Accept-Profile` / `Content-Profile` to pick another allowed schema. Joins, `or=`/`and=` and RPC are not supported (use a view). Table and column names are validated against the catalog and values are always bound parameters.
+
+### Running more than one replica
+
+Both in-memory pieces have a shared mode. Turn them on for **every** replica of the app:
+
+| Setting | What it does |
+|---|---|
+| `RATE_LIMIT_BACKEND=postgres` | One token bucket per key for all replicas (`xbase.rate_limit_check`, migration `0004`). If the database is slow (>250 ms) or down, that request uses the local bucket, so a DB blip never becomes an API outage (`xbase_rate_limit_fallbacks_total`). |
+| `REALTIME_CLUSTER=true` | Broadcast and presence are replayed to the other replicas over `NOTIFY xbase_rt_<app>`. Presence uses diffs plus a 30 s sync, and entries of a silent replica expire after 90 s. Messages are limited to about 7 KB in this mode. Needs `DIRECT_DATABASE_URL`. |
+
+Database change events (`subscribe_changes`) and background jobs already work across replicas. Add the replica to `docker-compose.saas.yml` (commented example) and to the Caddy `reverse_proxy` list. No sticky sessions are needed.
 
 ### Realtime protocol
 
@@ -186,14 +231,22 @@ Set `EMBEDDING_API_URL`. Any OpenAI-compatible endpoint works, including Ollama 
 ```bash
 cd backend && cp .env.example .env && cargo run
 cargo test                      # unit + HTTP tests (no database needed)
-cd ../go-backend && go test ./...
+cd ../go-backend && go test -race ./...
 ```
 
 ---
 
 ## Part 3: The Go Template
 
-`go-backend/` provides `/health`, `/health/db`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
+`go-backend/` provides `/health`, `/health/db`, `/metrics`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It also implements, with the same routes, scopes and wire formats as the Rust backend:
+
+- **Storage:** buckets (admin), signed URLs with transforms, streaming upload/download, batch delete, TUS details; user JWT or API key confined to `<workspace_id>/`.
+- **Vector:** `…/embeddings`, `…/embeddings/search`, `DELETE …/embeddings/:id` (no `reindex`, since the Go template has no job queue).
+- **Billing:** Stripe and LemonSqueezy webhooks. The plan sync runs inside the webhook's own transaction, so the event is recorded and applied together or not at all.
+- **Realtime:** `/ws` rooms, broadcast, presence, change feed, and `REALTIME_CLUSTER` using the same envelope as Rust.
+- **Rate limiting:** memory or shared (`RATE_LIMIT_BACKEND=postgres`) with the same fail-over.
+
+Not ported: the GoTrue proxy, workspace members/invitations, API-key management, the generic REST API and the job queue. It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
 
 ```go
 err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
@@ -212,4 +265,26 @@ err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
 | Restore | `scripts/restore-postgres.sh backup.tar.age [db] [target]` restores into a new database by default so you can verify before swapping. |
 | Branching | `scripts/db-branch.sh create pr-42 [--with-data]` / `delete pr-42`. Point a preview backend at `branch_pr_42`. |
 | Monitoring | `docker-compose.monitoring.yml` alerts on disk > 85%, RAM > 90%, CPU, down targets, container restart loops, 5xx > 5% and failing jobs. |
-| PITR | The nightly dumps give you a 24-hour RPO. For point-in-time recovery, add WAL-G or pgBackRest WAL archiving to the `db` service. |
+| PITR | Continuous WAL archiving plus nightly base backups: restore to any second in the retention window (RPO about 1–2 minutes). Setup below. |
+
+### Point-in-time recovery
+
+```bash
+sudo ./scripts/install-pitr.sh                  # installs xbase-pitr + systemd timers, creates the WAL spool
+sudoedit /etc/xbase/pitr.env                    # RCLONE_REMOTE + AGE_RECIPIENT at minimum
+cd supabase-project && docker compose -f docker-compose.yml -f ../docker/supabase-pitr.override.yml up -d db   # one restart
+sudo systemctl enable --now xbase-pitr-ship.timer xbase-pitr-base.timer
+sudo xbase-pitr base-backup && sudo xbase-pitr status
+```
+
+Postgres copies each finished WAL segment (and one every 60 s at most) to a host directory. A timer encrypts each file, uploads it with `rclone`, verifies the upload and only then deletes the local copy. A nightly `pg_basebackup` is streamed straight to the bucket, so the VPS needs no scratch disk. `xbase-pitr status --check` exits non-zero if archiving is off, WAL is piling up locally or the newest base is older than 36 h (wire it to `HEALTHCHECK_URL`).
+
+**Rehearse a restore now, not during an incident:**
+
+```bash
+sudo xbase-pitr restore "2026-11-08 14:30:00+00"    # or: latest
+```
+
+It rebuilds a data directory from the right base plus WAL up to that time and boots it as a throwaway container on `127.0.0.1:54329` (archiving off, so it never writes to your real archive). It prints the commands to make it production, which stays a deliberate manual step. Keep the age private key offline. Without it neither backups nor WAL can be decrypted.
+
+If local WAL grows past `MAX_LOCAL_WAL_MB` (uploads failing), fix the remote before the disk fills: a full disk makes `archive_command` fail and Postgres eventually stops.

@@ -15,11 +15,13 @@ xbase/
 ├── migrations/                        # Embedded via sqlx::migrate!, applied on boot over port 5432
 │   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
 │   ├── 0002_platform_core.sql         # members, invitations, api_keys, jobs, webhook_events, CDC triggers, RLS + grants
-│   └── 0003_vector_embeddings.sql     # pgvector xbase.embeddings (vector(1536), HNSW)
+│   ├── 0003_vector_embeddings.sql     # pgvector xbase.embeddings (vector(1536), HNSW)
+│   ├── 0004_shared_rate_limit.sql     # UNLOGGED xbase.rate_limits + xbase.rate_limit_check() (shared token bucket)
+│   └── 0005_storage_policies.sql      # xbase.can_access_storage_object() + storage.objects policies (skips if not owner)
 ├── backend/src/                       # Rust (Axum 0.7 + SQLx 0.8 + Tokio)
 │   ├── main.rs       # boot: migrations → pool → register app → job workers → CDC listener → serve
 │   ├── config.rs     # AppConfig (all env vars; AppConfig::for_tests())
-│   ├── state.rs      # AppState { pool, config, http, realtime, limiter, jobs_notify, metrics }
+│   ├── state.rs      # AppState { pool, config, http, realtime, limiter, jobs_notify, metrics, rest_cache }
 │   ├── error.rs      # ApiError (sqlx/reqwest mapping: 23505→409, 42501→403, P0001→400 ...)
 │   ├── db.rs         # Supavisor pool (statement_cache_capacity(0)), run_migrations, register_app
 │   ├── rls.rs        # begin_rls / with_rls_claims (set_config role + request.jwt.claims, tx-local)
@@ -27,24 +29,30 @@ xbase/
 │   ├── gotrue.rs     # GoTrue proxy: signup/token/refresh/otp/magiclink/verify/recover/authorize/exchange/user/logout + admin users
 │   ├── workspaces.rs # workspace/member/invitation CRUD (all via begin_rls)
 │   ├── api_keys.rs   # xb_<prefix>_<secret>, SHA-256 hashed, scopes, management endpoints
-│   ├── storage.rs    # Supabase Storage proxy: buckets (admin), signed URLs, streaming objects, TUS, transforms
-│   ├── realtime.rs   # /ws hub: rooms, broadcast, presence, NOTIFY xbase_changes → subscribers
+│   ├── storage.rs    # Supabase Storage proxy: buckets (admin), signed URLs, streaming objects, TUS, transforms; user JWT or API key (confined to <workspace_id>/)
+│   ├── realtime.rs   # /ws hub: rooms, broadcast, presence, NOTIFY xbase_changes → subscribers; REALTIME_CLUSTER fan-out over NOTIFY xbase_rt_<app>
+│   ├── rest.rs       # PostgREST-style CRUD /api/v1/rest/:table (catalog-validated identifiers, bound values, RLS)
 │   ├── vector.rs     # pgvector upsert/search, OpenAI-compatible embeddings, reindex job
 │   ├── billing.rs    # Stripe + LemonSqueezy signature verification → webhook_events → job → plan sync
 │   ├── jobs.rs       # SKIP LOCKED queue, backoff, reaper; add kinds in jobs::dispatch
-│   ├── rate_limit.rs # sharded token bucket keyed api-key > user > IP
+│   ├── rate_limit.rs # token bucket keyed api-key > user > IP; backend memory | postgres (shared across replicas)
 │   ├── metrics.rs    # Prometheus text /metrics
 │   └── routes.rs     # build_router + HTTP tests
-├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, rate limit
+├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, shared rate limit,
+│   └── internal/httpapi/              #   storage, vector, billing, realtime (+cluster), /metrics (same wire protocols as Rust)
 ├── docker/
 │   ├── docker-compose.saas.yml        # Rust saas-api-1 + Go saas-api-2 + Caddy (build context = repo root)
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
 │   ├── supabase-auth.override.yml     # GoTrue OAuth/SAML/SMTP env layer
+│   ├── supabase-pitr.override.yml     # enables WAL archiving (archive_mode/archive_command) on the Supabase db service
+│   ├── storage-policies.sql           # same policy SQL as migration 0005, for running as the DB superuser
 │   ├── monitoring/                    # prometheus.yml, alerts.yml, alertmanager.yml, grafana datasource
 │   └── Caddyfile
 └── scripts/
     ├── bootstrap-supabase.sh          # clone + upstream generate-keys.sh (ANON/SERVICE keys match JWT_SECRET)
-    ├── backup-postgres.sh / restore-postgres.sh / install-backups.sh
+    ├── backup-postgres.sh / restore-postgres.sh / install-backups.sh   # nightly logical dumps
+    ├── pitr.sh / install-pitr.sh      # WAL shipping + base backups + point-in-time restore rehearsal (RPO ≈ 1-2 min)
+    ├── apply-storage-policies.sh      # install storage.objects policies as supabase_admin
     └── db-branch.sh                   # branch_<name> databases for previews
 ```
 
@@ -56,7 +64,9 @@ xbase/
 ./scripts/bootstrap-supabase.sh                       # Supabase docker + secrets
 cd backend && cargo test                              # Rust unit + HTTP tests (no DB needed)
 cd backend && cp .env.example .env && cargo run       # needs DATABASE_URL + DIRECT_DATABASE_URL
-cd go-backend && go test ./...                        # Go tests
+cd go-backend && go test -race ./...                  # Go tests (WebSocket + storage proxy use in-process fakes)
+sudo ./scripts/install-pitr.sh && sudo xbase-pitr status   # point-in-time recovery (see README → Operations)
+./scripts/apply-storage-policies.sh                   # only if migration 0005 printed "skipped storage.objects policies"
 docker build -f backend/Dockerfile .                  # Rust image: build context MUST be repo root
 cd docker && docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
 ```
@@ -69,8 +79,11 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 2. **Zero-network JWT validation** with `SUPABASE_JWT_SECRET`. `sub` is optional in `SupabaseClaims` because Supabase `anon`/`service_role` keys have none; the extractor rejects sub-less tokens unless role is `service_role`.
 3. **Postgres is the authorization layer.** User-facing queries go through `rls::begin_rls`, never the bare pool. Policies live in migrations; billing/secret columns are protected by column-level grants. Internal tables (`jobs`, `webhook_events`) have RLS on and no policies.
 4. **Everything is scoped by `APP_ID`**: workspaces (`app_slug`), API keys, jobs, webhook events, embeddings, storage buckets (`<APP_ID>-<name>`). Never query those tables without the app predicate.
-5. **API-key principals** bypass RLS (service connection), so handlers must call `Principal::require_workspace_scope` and keep explicit `workspace_id`/`app_slug` predicates.
-6. **Migrations are append-only** (sqlx checksums). Add `000N_*.sql`; never edit applied files. `set_ignore_missing(true)` lets older binaries boot against newer schemas.
+5. **API-key principals** bypass RLS (service connection), so handlers must call `Principal::require_workspace_scope` and keep explicit `workspace_id`/`app_slug` predicates. Storage is the same rule on the file side: a key runs with the service role, so `storage.rs` confines it to `<its workspace_id>/…` and to the `storage:read` / `storage:write` scopes. The generic REST API never accepts keys.
+6. **Object naming convention:** storage objects live at `<workspace_uuid>/<path>` in bucket `<APP_ID>-<name>`. The `storage.objects` policies (migration 0005), the API-key confinement in `storage.rs` and the Go proxy all depend on it.
+7. **Multi-replica rules.** More than one replica of an `APP_ID` requires `RATE_LIMIT_BACKEND=postgres` and `REALTIME_CLUSTER=true` on every replica. Cluster messages must stay under the NOTIFY limit (~7 KB). Jobs, migrations and CDC are already replica-safe (`SKIP LOCKED`, advisory lock, per-replica `LISTEN`).
+8. **REST API safety:** identifiers only ever come from the catalog and are quoted; values are always bound (`($n::text)::<column type>`). `xbase`, `auth`, `storage` and other internals are refused regardless of `REST_SCHEMAS`; PATCH/DELETE require a filter.
+9. **Migrations are append-only** (sqlx checksums). Add `000N_*.sql`; never edit applied files. `set_ignore_missing(true)` lets older binaries boot against newer schemas.
 
 ---
 
@@ -85,9 +98,26 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 - [x] Billing: Stripe + LemonSqueezy webhook verification, idempotent event log, plan/status/period sync; durable background job queue.
 - [x] pgvector embeddings with server-side embedding (OpenAI-compatible), metadata filters, reindex job.
 - [x] Per-key/user/IP token-bucket rate limiting; hashed scoped API keys (`x-api-key`).
+- [x] **Horizontal scaling:** `RATE_LIMIT_BACKEND=postgres` shares one token bucket per key across replicas (atomic upsert in `xbase.rate_limit_check`, 250 ms budget, falls back to the local bucket); `REALTIME_CLUSTER=true` replays broadcast + presence to other replicas over `NOTIFY xbase_rt_<app>` (presence diffs + 30 s sync + 90 s expiry). Metrics: `xbase_rate_limit_fallbacks_total`, `xbase_realtime_cluster_messages_total`.
+- [x] **Storage via API keys** (`storage:read` / `storage:write`, confined to `<workspace_id>/`) and **storage policies** (migration 0005 + `scripts/apply-storage-policies.sh`): workspace members read, owner/admin/member write.
+- [x] **REST:** `/api/v1/rest/:table` with select/filters (`eq neq gt gte lt lte like ilike is in not.`)/order/limit/offset, insert (batch + upsert), PATCH, DELETE, `Prefer: count=exact`. Opt-in with `REST_ENABLED=true`.
+- [x] **PITR:** WAL archiving override + `pitr.sh` (ship-wal, base-backup, prune, status, restore into a throwaway container); everything encrypted before upload.
+- [x] **Go parity:** storage, vector (no reindex job), billing (plan sync inline in the webhook transaction), realtime incl. cluster mode, shared rate limiter, `/metrics`, service-role admin gate.
 - [x] Prometheus `/metrics`; Go backend template; ops: secrets bootstrap (fixed ANON/SERVICE key mismatch), SMTP/OAuth/SAML override, encrypted backups + restore + systemd timer, DB branching, monitoring + alerts.
 
-Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching).
+Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching) — **that run predates the items marked "Needs live verification" below.**
+
+### Needs live verification
+
+The horizontal-scaling, REST, storage-policy, PITR and Go-parity work was written and unit-tested **without a running Postgres/Docker** (Rust 54 tests, Go `-race` suite, `bash -n`, YAML parse). Not yet exercised against a real database or Supabase stack:
+
+1. Migrations `0004`/`0005` (SQL syntax, `rate_limit_check` under concurrency, the `storage.objects` DO block on a real `supabase_storage_admin`-owned table).
+2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
+3. Two real replicas with `REALTIME_CLUSTER=true` (NOTIFY round trip, reconnect after killing the LISTEN connection).
+4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
+5. Go billing/vector SQL (`::extensions.vector`, the subscription update) against the real schema.
+
+Run these once before relying on them; `pitr.sh restore latest` doubles as the PITR rehearsal.
 
 ---
 
@@ -95,10 +125,10 @@ Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invit
 
 | Area | Gap |
 | :--- | :--- |
-| Horizontal scaling | Realtime hub and rate limiter are in-memory per process. Running >1 replica of the same SaaS needs room fan-out over `NOTIFY` (or Redis) and a shared limiter. |
-| Storage via API keys | Storage endpoints accept user JWTs only (Storage RLS needs a user identity). |
-| Dynamic REST | No PostgREST-style query builder in Rust; the Supabase PostgREST container already serves `/rest/v1` for generic CRUD. |
-| PITR | Nightly logical dumps only (24h RPO). Add WAL-G/pgBackRest WAL archiving for point-in-time recovery. |
-| Go template parity | Go service covers health, me, workspaces, API-key auth and rate limiting — not storage/realtime/billing/vector. |
-| Storage policies | Create `storage.objects` RLS policies per bucket (e.g. `(storage.foldername(name))[1] = auth.uid()::text`) — not shipped as migrations because buckets are app-specific. |
+| Cluster limits | Clustered realtime messages are capped at ~7 KB (NOTIFY payload limit) and presence converges within ≤30 s after a replica crash. For larger payloads or very high fan-out, move to Redis pub/sub. The shared limiter adds one DB round-trip per request and serialises on one row per key. |
+| REST scope | No resource embedding (joins), `or=`/`and=` groups, RPC or API-key access. Use views for joins. |
+| Storage resumable (TUS) | Still user-JWT only: the response embeds the caller's token, which an API key does not have. |
+| Storage policy owner | If `postgres` does not own `storage.objects`, run `scripts/apply-storage-policies.sh` once as `supabase_admin`. A workspace of app `x` could in theory address bucket `x-1-…` by prefix; object paths are workspace-UUID-scoped so no data crosses, but prefer app slugs that are not prefixes of each other. |
+| PITR | RPO ≈ `archive_timeout` (60 s) + 1 min shipping; the restore is a rehearsal into a scratch container — promoting it to production is a deliberate manual step. Uses plain `cp`/`pg_basebackup`, not WAL-G/pgBackRest (no dependency on tools bundled in the Supabase image); switch to pgBackRest for incremental backups on multi-hundred-GB databases. |
+| Go template parity | Go still lacks the GoTrue proxy, workspace members/invitations, API-key management endpoints, the generic REST API and the durable job queue (so no `embeddings/reindex`). |
 | Multi-project Studio | Self-hosted Studio manages one cluster; isolation is logical (`app_slug` / per-SaaS schemas). |
