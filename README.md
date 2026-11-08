@@ -231,7 +231,7 @@ Set `EMBEDDING_API_URL`. Any OpenAI-compatible endpoint works, including Ollama 
 ```bash
 cd backend && cp .env.example .env && cargo run
 cargo test                      # unit + HTTP tests (no database needed)
-cd ../go-backend && go test ./...
+cd ../go-backend && go test -race ./...
 ```
 
 ---
