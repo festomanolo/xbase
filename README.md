@@ -204,42 +204,12 @@ err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
 
 ---
 
-## Why This Is Ideal for Hosting 10 SaaS Apps on One VPS
+## Part 4: Operations
 
-* **Minimal RAM Footprint:** Node.js or Python backends can consume 100MB+ of RAM just idling. A compiled Go or Rust binary can idle at under 15MB. When running 10 distinct SaaS backends on a single VPS, this difference prevents your server from crashing due to out-of-memory errors.
-* **Concurrency:** Go's goroutines and Rust's asynchronous runtime (`tokio`) can handle tens of thousands of concurrent requests with minimal CPU overhead, ensuring that a traffic spike on SaaS #1 doesn't slow down SaaS #2.
-
-> **Crucial Setup Requirement (Supavisor Port `6543`):**
-> Because you are running 10 SaaS apps, you must utilize **Supavisor** (Supabase's built-in connection pooler). Postgres limits the number of direct, simultaneous connections it can handle. Point your Rust/Go backends to the Supavisor transaction pooler port (`6543`) rather than the direct Postgres port (`5432`) so the pooler can efficiently share connections across all 10 of your applications.
->
-> In [`backend/src/db.rs`](backend/src/db.rs), `statement_cache_capacity(0)` is explicitly configured on `PgConnectOptions` so `sqlx` works seamlessly with Supavisor's transaction pooling mode on port `6543`.
-
----
-
-## Running the Included Rust (Axum + SQLx) Backend
-
-### Local Development
-
-```bash
-cd backend
-cp .env.example .env
-# Edit .env with your DATABASE_URL (port 6543) and SUPABASE_JWT_SECRET
-
-cargo run
-```
-
-### Run Unit Tests
-
-```bash
-cd backend
-cargo test
-```
-
-### Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/health` | Public | Liveness & process metrics check |
-| `GET` | `/health/db` | Public | Verifies Supavisor (`6543`) PostgreSQL connectivity |
-| `GET` | `/api/v1/me` | Bearer JWT | Verifies Supabase JWT & returns authenticated user claims |
-| `GET` | `/api/v1/tenants/:app_slug` | Bearer JWT | Queries multi-SaaS tenant workspace data directly from Postgres |
+| Concern | Tool |
+|---|---|
+| Backups | `scripts/backup-postgres.sh`: per-database `pg_dump -Fc` + globals, encrypted with `age` (or AES-256 via OpenSSL), uploaded with `rclone`, with retention pruning, checksums and an optional healthchecks.io ping. Nightly via `install-backups.sh`. |
+| Restore | `scripts/restore-postgres.sh backup.tar.age [db] [target]` restores into a new database by default so you can verify before swapping. |
+| Branching | `scripts/db-branch.sh create pr-42 [--with-data]` / `delete pr-42`. Point a preview backend at `branch_pr_42`. |
+| Monitoring | `docker-compose.monitoring.yml` alerts on disk > 85%, RAM > 90%, CPU, down targets, container restart loops, 5xx > 5% and failing jobs. |
+| PITR | The nightly dumps give you a 24-hour RPO. For point-in-time recovery, add WAL-G or pgBackRest WAL archiving to the `db` service. |
