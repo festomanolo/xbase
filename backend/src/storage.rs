@@ -459,7 +459,7 @@ struct DeleteObjects {
 
 async fn delete_objects(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<DeleteObjects>,
 ) -> ApiResult<Json<Value>> {
@@ -470,13 +470,13 @@ async fn delete_objects(
     let paths = body
         .paths
         .iter()
-        .map(|p| validate_object_path(p).map(str::to_string))
+        .map(|p| caller.object_path(p, Access::Write))
         .collect::<ApiResult<Vec<_>>>()?;
     let url = storage_url(&state.config.storage_url, &["object"], &id, None)?;
     let req = authed(
         &state,
         state.http.delete(url).json(&json!({ "prefixes": paths })),
-        Cred::User(&user.token),
+        caller.cred(),
     )?;
     Ok(Json(json_response(req.send().await?).await?.1))
 }
@@ -532,6 +532,40 @@ mod tests {
         assert!(validate_object_path("u/../etc/passwd").is_err());
         assert!(validate_object_path("u//a").is_err());
         assert!(validate_object_path("").is_err());
+    }
+
+    fn key(ws: uuid::Uuid, scopes: &[&str]) -> Caller {
+        Caller::Key(ApiKeyPrincipal {
+            key_id: uuid::Uuid::nil(),
+            workspace_id: ws,
+            app_slug: "app1".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn api_keys_are_confined_to_their_workspace_folder() {
+        let ws = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let k = key(ws, &["storage:read", "storage:write"]);
+        assert!(k.object_path(&format!("{ws}/a/b.png"), Access::Write).is_ok());
+        assert!(k.object_path(&format!("{other}/a.png"), Access::Read).is_err());
+        assert!(k.object_path("a.png", Access::Read).is_err());
+        assert!(k.object_path(&format!("{ws}/../{other}/a.png"), Access::Read).is_err(), "traversal rejected");
+        assert_eq!(k.list_prefix("").unwrap(), ws.to_string());
+        assert_eq!(k.list_prefix(&format!("/{ws}/docs/")).unwrap(), format!("{ws}/docs"));
+        assert!(k.list_prefix(&other.to_string()).is_err());
+    }
+
+    #[test]
+    fn api_key_scopes_gate_read_and_write() {
+        let ws = uuid::Uuid::new_v4();
+        let ro = key(ws, &["storage:read"]);
+        assert!(ro.object_path(&format!("{ws}/a"), Access::Read).is_ok());
+        assert!(ro.object_path(&format!("{ws}/a"), Access::Write).is_err());
+        let none = key(ws, &["embeddings:read"]);
+        assert!(none.list_prefix("").is_err());
+        assert!(key(ws, &["*"]).object_path(&format!("{ws}/a"), Access::Write).is_ok());
     }
 
     #[test]
