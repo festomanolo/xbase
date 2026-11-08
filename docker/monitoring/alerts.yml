@@ -46,3 +46,15 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "{{ $labels.app }} background jobs are failing"
+      - alert: SharedRateLimiterDegraded
+        expr: increase(xbase_rate_limit_fallbacks_total[5m]) > 20
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.app }} shared rate limiter is failing over to per-replica buckets (check Postgres latency)"
+      - alert: RealtimeClusterDroppingMessages
+        expr: increase(xbase_realtime_cluster_messages_total{direction="dropped"}[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.app }} is dropping cross-replica realtime messages (payload > 7 KB or publisher backlog)"
