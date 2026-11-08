@@ -109,7 +109,7 @@ Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invit
 
 ### Live verification (2026-11-08)
 
-The horizontal-scaling, REST, storage-policy, PITR and Go-parity work was written and unit-tested **without a running Postgres/Docker** (Rust 54 tests, Go `-race` suite, `bash -n`, YAML parse). Not yet exercised against a real database or Supabase stack:
+Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25.7`, two replicas of each backend, and (for PITR) a Linux container with `rclone` + `age`. All passed after the fixes below:
 
 1. Migrations `0004`/`0005` (SQL syntax, `rate_limit_check` under concurrency, the `storage.objects` DO block on a real `supabase_storage_admin`-owned table).
 2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
