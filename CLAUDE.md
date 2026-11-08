@@ -35,7 +35,7 @@ xbase/
 │   ├── vector.rs     # pgvector upsert/search, OpenAI-compatible embeddings, reindex job
 │   ├── billing.rs    # Stripe + LemonSqueezy signature verification → webhook_events → job → plan sync
 │   ├── jobs.rs       # SKIP LOCKED queue, backoff, reaper; add kinds in jobs::dispatch
-│   ├── rate_limit.rs # sharded token bucket keyed api-key > user > IP
+│   ├── rate_limit.rs # token bucket keyed api-key > user > IP; backend memory | postgres (shared across replicas)
 │   ├── metrics.rs    # Prometheus text /metrics
 │   └── routes.rs     # build_router + HTTP tests
 ├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, rate limit
