@@ -265,4 +265,26 @@ err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
 | Restore | `scripts/restore-postgres.sh backup.tar.age [db] [target]` restores into a new database by default so you can verify before swapping. |
 | Branching | `scripts/db-branch.sh create pr-42 [--with-data]` / `delete pr-42`. Point a preview backend at `branch_pr_42`. |
 | Monitoring | `docker-compose.monitoring.yml` alerts on disk > 85%, RAM > 90%, CPU, down targets, container restart loops, 5xx > 5% and failing jobs. |
-| PITR | The nightly dumps give you a 24-hour RPO. For point-in-time recovery, add WAL-G or pgBackRest WAL archiving to the `db` service. |
+| PITR | Continuous WAL archiving plus nightly base backups: restore to any second in the retention window (RPO about 1–2 minutes). Setup below. |
+
+### Point-in-time recovery
+
+```bash
+sudo ./scripts/install-pitr.sh                  # installs xbase-pitr + systemd timers, creates the WAL spool
+sudoedit /etc/xbase/pitr.env                    # RCLONE_REMOTE + AGE_RECIPIENT at minimum
+cd supabase-project && docker compose -f docker-compose.yml -f ../docker/supabase-pitr.override.yml up -d db   # one restart
+sudo systemctl enable --now xbase-pitr-ship.timer xbase-pitr-base.timer
+sudo xbase-pitr base-backup && sudo xbase-pitr status
+```
+
+Postgres copies each finished WAL segment (and one every 60 s at most) to a host directory. A timer encrypts each file, uploads it with `rclone`, verifies the upload and only then deletes the local copy. A nightly `pg_basebackup` is streamed straight to the bucket, so the VPS needs no scratch disk. `xbase-pitr status --check` exits non-zero if archiving is off, WAL is piling up locally or the newest base is older than 36 h (wire it to `HEALTHCHECK_URL`).
+
+**Rehearse a restore now, not during an incident:**
+
+```bash
+sudo xbase-pitr restore "2026-11-08 14:30:00+00"    # or: latest
+```
+
+It rebuilds a data directory from the right base plus WAL up to that time and boots it as a throwaway container on `127.0.0.1:54329` (archiving off, so it never writes to your real archive). It prints the commands to make it production, which stays a deliberate manual step. Keep the age private key offline. Without it neither backups nor WAL can be decrypted.
+
+If local WAL grows past `MAX_LOCAL_WAL_MB` (uploads failing), fix the remote before the disk fills: a full disk makes `archive_command` fail and Postgres eventually stops.
