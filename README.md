@@ -90,7 +90,19 @@ cd docker && GRAFANA_ADMIN_PASSWORD=... sudo docker compose -f docker-compose.mo
 
 The Rust backend applies `migrations/` automatically on boot over the direct `5432` connection. sqlx's advisory lock makes it safe for several backends to boot at once.
 
-You can use our automated helper script to clone the official Supabase Docker configuration and generate secure secrets automatically:
+### Adding SaaS #3 … #10
+
+Each SaaS is one container with its own `APP_ID`:
+
+1. Copy the `saas-api-1` block in `docker/docker-compose.saas.yml` and change `container_name`, `APP_ID`, `CORS_ALLOWED_ORIGINS` and the Stripe secrets.
+2. Add a site block to `docker/Caddyfile`.
+3. Add the target to `docker/monitoring/prometheus.yml`.
+
+Data isolation between apps comes from `app_slug` predicates and RLS. Storage isolation comes from per-app bucket prefixes (`<APP_ID>-<bucket>`). Jobs, webhook events and API keys are all scoped by `APP_ID`.
+
+### OAuth, SAML and SMTP
+
+Self-hosted Studio has no provider UI. Set the credentials in `supabase-project/.env` and layer the override file:
 
 ```bash
 chmod +x scripts/bootstrap-supabase.sh
