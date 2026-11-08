@@ -114,8 +114,9 @@ Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25
 | Area | What was exercised |
 | :--- | :--- |
 | Migrations `0001`–`0005` | Applied in order as `postgres`. `0005` installs the policies on the real `supabase_storage_admin`-owned `storage.objects`; the unprivileged-role skip path and `apply-storage-policies.sh` also work. |
-2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
-3. Two real replicas with `REALTIME_CLUSTER=true` (NOTIFY round trip, reconnect after killing the LISTEN connection).
+| Shared limiter | `rate_limit_check`: sequential refill, key isolation, grants; 200 concurrent calls on a burst of 50 allowed exactly 50. Through two real replicas (Rust and Go) the global limit held. |
+| REST (Rust) | 27 HTTP checks: CRUD, filters/order/paging/count, upsert, bad casts → 400, SQL-looking values stored literally, RLS isolation between users, internal schemas refused. |
+| Realtime cluster (Rust + Go) | Real WebSockets on two replicas: cross-replica broadcast and presence, late-joiner sync, leave diffs, oversize rejection, DB change feed on both replicas, and recovery after every `LISTEN` backend was terminated. |
 4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
 5. Go billing/vector SQL (`::extensions.vector`, the subscription update) against the real schema.
 
