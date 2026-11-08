@@ -135,10 +135,29 @@ func Load() (*Config, error) {
 	if c.RateLimitBurst, err = strconv.ParseFloat(env("RATE_LIMIT_BURST", "60"), 64); err != nil {
 		return nil, fmt.Errorf("invalid RATE_LIMIT_BURST: %w", err)
 	}
-	for _, o := range strings.Split(env("CORS_ALLOWED_ORIGINS", ""), ",") {
+	c.CORSAllowedOrigins = splitList(env("CORS_ALLOWED_ORIGINS", ""))
+	return c, nil
+}
+
+func splitList(raw string) []string {
+	var out []string
+	for _, o := range strings.Split(raw, ",") {
 		if o = strings.TrimSpace(o); o != "" {
-			c.CORSAllowedOrigins = append(c.CORSAllowedOrigins, o)
+			out = append(out, o)
 		}
 	}
-	return c, nil
+	return out
+}
+
+// ParsePairs parses "key:value,key2:value2" maps such as STRIPE_PRICE_PLANS.
+func ParsePairs(raw string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(pair, ":")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if ok && k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	return out
 }
