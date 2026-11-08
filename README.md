@@ -66,8 +66,9 @@ xbase/
 **Prerequisites:** Ubuntu 22.04/24.04 or Debian, **4 GB RAM / 2 vCPU** minimum, a domain pointing at the server.
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y git curl openssl
+# 1. Docker + tools
+sudo apt update && sudo apt install -y git curl openssl age rclone
+curl -fsSL https://get.docker.com | sudo sh
 
 # Install Docker Engine
 curl -fsSL https://get.docker.com -o get-docker.sh
