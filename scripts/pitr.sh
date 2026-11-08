@@ -27,6 +27,12 @@ set -euo pipefail
 #   status [--check]                 archiver health; --check exits 1 if unhealthy
 #   restore [TARGET_TIME|latest]     rehearse / perform recovery into a scratch dir
 #                                    TARGET_TIME e.g. "2026-11-08 14:30:00+00"
+#   promote RESTORE_DIR --yes-replace-production
+#                                    make a checked restore the live database: stops
+#                                    the DB container, keeps the old data dir aside
+#                                    (data.pre-promote-<time>), swaps in the restored
+#                                    one, re-enables archiving, starts and verifies;
+#                                    puts the old data back if the new one won't start
 #
 # Config: /etc/xbase/pitr.env (or env vars)
 #   DB_CONTAINER=supabase-db        PGUSER_ADMIN=supabase_admin
@@ -335,13 +341,88 @@ Recovered database is running (read/write) in container '$name_c':
   data dir: $dir/data
 
 Check it (row counts, the table you lost, ...). Then, to make it production:
-  1. docker compose ... stop              (stop the Supabase stack)
-  2. mv the live volume aside (keep it!):   <supabase>/volumes/db/data → data.broken
-  3. cp -a $dir/data <supabase>/volumes/db/data
-  4. start the stack; re-run  pitr.sh base-backup  (new timeline → new base)
-When done:  docker rm -f $name_c
+  pitr.sh promote $dir --yes-replace-production
+(or, by hand: stop the stack, move the live data dir aside, cp -a $dir/data in,
+remove the restore block from postgresql.auto.conf, start, run base-backup.)
+When done without promoting:  docker rm -f $name_c
 ──────────────────────────────────────────────────────────────────────────────
 EOF
+}
+
+# Live data directory of the DB container (must be a bind mount, as in Supabase's compose).
+live_data_dir() {
+  docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}} {{.Source}}{{end}}{{end}}' "$DB_CONTAINER"
+}
+
+wait_ready() { # container -> 0 when it accepts connections and is not in recovery
+  local c="$1" i state
+  for i in $(seq 1 60); do
+    state="$(docker exec "$c" psql -U "$PGUSER_ADMIN" -d postgres -qAt -c 'select pg_is_in_recovery()' 2>/dev/null || echo wait)"
+    [ "$state" = "f" ] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+cmd_promote() {
+  need docker
+  local dir="${1:-}" confirm="${2:-}"
+  [ -n "$dir" ] && [ -f "$dir/data/PG_VERSION" ] || die "usage: pitr.sh promote RESTORE_DIR --yes-replace-production (RESTORE_DIR from 'restore')"
+  [ "$confirm" = "--yes-replace-production" ] || die "refusing without --yes-replace-production: this replaces the live database"
+  dir="$(cd "$dir" && pwd)"
+
+  local mount type live
+  mount="$(live_data_dir)"
+  type="${mount%% *}"; live="${mount#* }"
+  [ "$type" = "bind" ] && [ -d "$live" ] || die "$DB_CONTAINER data is not a host bind mount ($mount); promote by hand"
+  case "$dir/data" in "$live"|"$live"/*) die "restore dir is inside the live data dir" ;; esac
+
+  local live_ver new_ver
+  live_ver="$(cat "$live/PG_VERSION")"; new_ver="$(cat "$dir/data/PG_VERSION")"
+  [ "$live_ver" = "$new_ver" ] || die "major version mismatch: live $live_ver, restore $new_ver"
+
+  log "stopping the verification container (clean shutdown) ..."
+  docker stop -t 120 xbase-pitr-verify >/dev/null 2>&1 || true
+  docker rm -f xbase-pitr-verify >/dev/null 2>&1 || true
+  [ ! -f "$dir/data/postmaster.pid" ] || die "$dir/data/postmaster.pid exists: is a server still using it?"
+
+  # Drop the rehearsal-only settings (archive off, restore_command, target) so the
+  # promoted cluster archives WAL again; Postgres removed recovery.signal on promote.
+  local auto="$dir/data/postgresql.auto.conf"
+  if [ -f "$auto" ]; then
+    awk '/^# --- written by xbase pitr.sh restore ---$/ {skip=1; next}
+         skip && /^(restore_command|recovery_target_time|recovery_target_action|archive_mode|archive_command) = / {next}
+         {skip=0; print}' "$auto" > "$auto.new" && mv "$auto.new" "$auto"
+  fi
+  rm -f "$dir/data/recovery.signal" "$dir/data/standby.signal"
+
+  local stamp aside
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"; aside="$live.pre-promote-$stamp"
+  local owner; owner="$(stat -c '%u:%g' "$live")"
+
+  log "stopping $DB_CONTAINER ..."
+  docker stop -t 300 "$DB_CONTAINER" >/dev/null
+  log "keeping the old data dir at $aside"
+  mv "$live" "$aside"
+  log "copying the restored cluster into place ..."
+  cp -a "$dir/data" "$live"
+  chown -R "$owner" "$live"; chmod 700 "$live"
+
+  log "starting $DB_CONTAINER on the restored data ..."
+  docker start "$DB_CONTAINER" >/dev/null
+  if ! wait_ready "$DB_CONTAINER"; then
+    log "the restored cluster did not come up — putting the old data back"
+    docker stop -t 60 "$DB_CONTAINER" >/dev/null 2>&1 || true
+    mv "$live" "$live.failed-promote-$stamp"
+    mv "$aside" "$live"
+    docker start "$DB_CONTAINER" >/dev/null
+    die "promote failed; production restored from $aside (failed copy kept at $live.failed-promote-$stamp)"
+  fi
+  docker exec "$DB_CONTAINER" psql -U "$PGUSER_ADMIN" -d postgres -qAt \
+    -c "select 'timeline ' || timeline_id || ', archive_mode=' || current_setting('archive_mode') from pg_control_checkpoint()" >&2 || true
+  log "promoted. Old data kept at $aside (delete it once you are sure)."
+  log "taking a fresh base backup for the new timeline ..."
+  if [ -n "$REMOTE" ]; then cmd_base_backup; else log "RCLONE_REMOTE not set: run 'pitr.sh base-backup' now"; fi
 }
 
 case "${1:-}" in
@@ -350,5 +431,6 @@ case "${1:-}" in
   prune)       shift; cmd_prune "$@" ;;
   status)      shift; cmd_status "$@" ;;
   restore)     shift; cmd_restore "$@" ;;
-  *) sed -n '3,40p' "$0" >&2; exit 2 ;;
+  promote)     shift; cmd_promote "$@" ;;
+  *) sed -n '3,46p' "$0" >&2; exit 2 ;;
 esac
