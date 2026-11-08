@@ -360,6 +360,12 @@ fn body_columns<'a>(cols: &'a [Column], rows: &[&serde_json::Map<String, Value>]
     Ok(used)
 }
 
+/// Rows are grouped by the exact set of keys they supply and each group becomes
+/// its own `INSERT` (chained as data-modifying CTEs, so still one statement and
+/// one transaction). A column a row does not mention therefore takes its DEFAULT
+/// instead of being forced to NULL, which a single `INSERT … SELECT cols` over
+/// rows with different keys would do. Response rows come back grouped, not in
+/// request order, when a batch mixes key sets.
 pub fn build_insert(
     schema: &str,
     table: &str,
@@ -369,39 +375,66 @@ pub fn build_insert(
     merge: bool,
 ) -> ApiResult<Built> {
     let rows = body_rows(body)?;
-    let used = body_columns(cols, &rows)?;
-    let names = used.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
+    body_columns(cols, &rows)?; // validates every key against the catalog
     let target = format!("{}.{}", q(schema), q(table));
 
-    let conflict = match on_conflict.filter(|c| !c.is_empty()) {
-        None => String::new(),
-        Some(list) => {
-            let keys = list
-                .split(',')
+    let conflict_keys: Option<Vec<String>> = match on_conflict.filter(|c| !c.is_empty()) {
+        None => None,
+        Some(list) => Some(
+            list.split(',')
                 .map(|c| find(cols, c.trim()).map(|c| c.name.clone()))
-                .collect::<ApiResult<Vec<_>>>()?;
-            let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
-            let updates: Vec<String> = used
-                .iter()
-                .filter(|c| !keys.contains(&c.name))
-                .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
-                .collect();
-            if merge && !updates.is_empty() {
-                format!(" on conflict ({key_sql}) do update set {}", updates.join(", "))
-            } else {
-                format!(" on conflict ({key_sql}) do nothing")
-            }
-        }
+                .collect::<ApiResult<Vec<_>>>()?,
+        ),
     };
+
+    let mut groups: Vec<(Vec<&Column>, Vec<Value>)> = Vec::new();
+    for row in rows {
+        let used: Vec<&Column> = cols.iter().filter(|c| row.contains_key(&c.name)).collect();
+        if used.is_empty() {
+            return Err(ApiError::bad_request("Every row must set at least one column"));
+        }
+        let value = Value::Object(row.clone());
+        match groups.iter_mut().find(|(g, _)| g.len() == used.len() && g.iter().zip(&used).all(|(a, b)| a.name == b.name)) {
+            Some((_, rows)) => rows.push(value),
+            None => groups.push((used, vec![value])),
+        }
+    }
+
+    let (mut ctes, mut selects, mut binds) = (Vec::new(), Vec::new(), Vec::new());
+    for (n, (used, group_rows)) in groups.into_iter().enumerate() {
+        let names = used.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
+        let conflict = match &conflict_keys {
+            None => String::new(),
+            Some(keys) => {
+                let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
+                let updates: Vec<String> = used
+                    .iter()
+                    .filter(|c| !keys.contains(&c.name))
+                    .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
+                    .collect();
+                if merge && !updates.is_empty() {
+                    format!(" on conflict ({key_sql}) do update set {}", updates.join(", "))
+                } else {
+                    format!(" on conflict ({key_sql}) do nothing")
+                }
+            }
+        };
+        binds.push(Bind::Json(Value::Array(group_rows)));
+        ctes.push(format!(
+            "i{n} as (insert into {target} ({names}) select {names} from jsonb_populate_recordset(null::{target}, ${}::jsonb){conflict} returning *)",
+            n + 1
+        ));
+        selects.push(format!("select * from i{n}"));
+    }
 
     Ok(Built {
         sql: format!(
-            "with r as (insert into {target} ({names}) \
-             select {names} from jsonb_populate_recordset(null::{target}, $1::jsonb){conflict} returning *) \
-             select {AGG} from r"
+            "with {} select {AGG} from ({}) r",
+            ctes.join(", "),
+            selects.join(" union all ")
         ),
         count_sql: None,
-        binds: vec![Bind::Json(Value::Array(rows.into_iter().map(|r| Value::Object(r.clone())).collect()))],
+        binds,
     })
 }
 
@@ -676,7 +709,13 @@ mod tests {
     fn insert_names_only_supplied_columns() {
         let body = json!([{"title": "a"}, {"title": "b", "done": true}]);
         let b = build_insert("public", "todos", &cols(), &body, None, false).unwrap();
-        assert!(b.sql.contains(r#"insert into "public"."todos" ("title", "done") select "title", "done" from jsonb_populate_recordset"#), "{}", b.sql);
+        // different key sets => separate INSERTs, so "done" keeps its DEFAULT for the first row
+        assert!(b.sql.contains(r#"insert into "public"."todos" ("title") select "title" from jsonb_populate_recordset(null::"public"."todos", $1::jsonb)"#), "{}", b.sql);
+        assert!(b.sql.contains(r#"("title", "done") select "title", "done" from jsonb_populate_recordset(null::"public"."todos", $2::jsonb)"#), "{}", b.sql);
+        assert_eq!(b.binds.len(), 2);
+        // identical key sets share one INSERT
+        let same = build_insert("public", "todos", &cols(), &json!([{"title":"a"},{"title":"b"}]), None, false).unwrap();
+        assert_eq!(same.binds.len(), 1);
         assert!(build_insert("public", "todos", &cols(), &json!({"nope": 1}), None, false).is_err());
         assert!(build_insert("public", "todos", &cols(), &json!([]), None, false).is_err());
         assert!(build_insert("public", "todos", &cols(), &json!(5), None, false).is_err());
