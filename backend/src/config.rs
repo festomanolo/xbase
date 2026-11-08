@@ -3,6 +3,16 @@ use std::env;
 
 use uuid::Uuid;
 
+/// Where token-bucket state lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitBackend {
+    /// Per-process buckets: zero latency, but each replica enforces its own limit.
+    Memory,
+    /// One shared bucket per key in Postgres (`xbase.rate_limit_check`): the limit
+    /// holds across any number of replicas, at the cost of one DB round-trip.
+    Postgres,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     /// Slug of the SaaS app this binary serves. Every workspace, API key, job and
@@ -37,6 +47,7 @@ pub struct AppConfig {
     pub trust_proxy_headers: bool,
     pub rate_limit_per_second: f64,
     pub rate_limit_burst: f64,
+    pub rate_limit_backend: RateLimitBackend,
     pub metrics_token: Option<String>,
 
     pub stripe_webhook_secret: Option<String>,
