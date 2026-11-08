@@ -70,12 +70,25 @@ xbase/
 sudo apt update && sudo apt install -y git curl openssl age rclone
 curl -fsSL https://get.docker.com | sudo sh
 
-# Install Docker Engine
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
+# 2. Supabase with freshly generated, mutually consistent secrets
+#    (JWT_SECRET, ANON_KEY and SERVICE_ROLE_KEY are signed together)
+DOMAIN=api.yourdomain.com SITE_URL=https://app1.yourdomain.com \
+SMTP_HOST=smtp.resend.com SMTP_PORT=587 SMTP_USER=resend SMTP_PASS=re_xxx \
+SMTP_ADMIN_EMAIL=no-reply@yourdomain.com \
+  ./scripts/bootstrap-supabase.sh
+
+cd supabase-project && sudo docker compose pull && sudo docker compose up -d && cd ..
+
+# 3. SaaS backends + Caddy (edit docker/Caddyfile domains first)
+cd docker
+sudo docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
+
+# 4. Backups (edit /etc/xbase/backup.env afterwards) and monitoring
+cd .. && sudo ./scripts/install-backups.sh
+cd docker && GRAFANA_ADMIN_PASSWORD=... sudo docker compose -f docker-compose.monitoring.yml up -d
 ```
 
-### 2. Clone the Supabase Repository (or Run the Bootstrap Script)
+The Rust backend applies `migrations/` automatically on boot over the direct `5432` connection. sqlx's advisory lock makes it safe for several backends to boot at once.
 
 You can use our automated helper script to clone the official Supabase Docker configuration and generate secure secrets automatically:
 
