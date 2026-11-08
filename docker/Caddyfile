@@ -29,6 +29,18 @@ api.yourdomain.com {
 }
 
 # 2. High-Performance Rust SaaS Backend #1 (WebSockets at /ws are proxied automatically)
+#
+#    Running 2+ replicas? List them all (and enable RATE_LIMIT_BACKEND=postgres +
+#    REALTIME_CLUSTER=true on each). Any replica can serve any request or
+#    WebSocket — no sticky sessions needed:
+#
+#      reverse_proxy saas-api-1:3000 saas-api-1b:3000 {
+#          lb_policy least_conn
+#          health_uri /health
+#          health_interval 10s
+#          header_up Host {host}
+#          header_up X-Real-IP {remote_host}
+#      }
 app1-api.yourdomain.com {
     import saas_backend
 
