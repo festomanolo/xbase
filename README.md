@@ -44,7 +44,7 @@ xbase/
 │       ├── vector.rs      # pgvector upsert/search, server-side embeddings, reindex job
 │       ├── billing.rs     # Stripe + LemonSqueezy webhooks → workspace plan sync
 │       ├── jobs.rs        # durable SKIP LOCKED job queue with retries/backoff
-│       ├── rate_limit.rs  # sharded token bucket per API key / user / IP
+│       ├── rate_limit.rs  # token bucket per API key / user / IP (memory or shared via Postgres)
 │       ├── metrics.rs     # Prometheus /metrics
 │       └── routes.rs      # router assembly + HTTP tests
 ├── go-backend/                        # Go service template (pgx, golang-jwt)
