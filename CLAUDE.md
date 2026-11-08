@@ -76,12 +76,18 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 
 ## What Is Implemented
 
-- [x] Self-hosted Supabase bootstrap script (`scripts/bootstrap-supabase.sh`) with automated cryptographic secret generation (`POSTGRES_PASSWORD`, `JWT_SECRET`, `DASHBOARD_PASSWORD`, `SECRET_KEY_BASE`, `VAULT_ENC_KEY`).
-- [x] Companion Docker Compose stack (`docker/docker-compose.saas.yml`) & `docker/Caddyfile` reverse proxy for automatic Let's Encrypt TLS.
-- [x] Starter multi-SaaS SQL migration (`migrations/0001_init_multi_saas.sql`) with `xbase.apps`, `xbase.workspaces`, and RLS policies.
-- [x] Rust (`Axum` + `SQLx`) backend with Supavisor-compatible connection pooling (`statement_cache_capacity(0)`).
-- [x] Local Supabase JWT verification middleware/extractor (`SupabaseClaims`).
-- [x] Liveness (`/health`), database readiness (`/health/db`), current user (`/api/v1/me`), and tenant workspace listing (`/api/v1/tenants/:app_slug`) endpoints with unit tests.
+- [x] Auth: GoTrue proxy for sign-up, password sign-in, OTP, magic link, verify, recovery, OAuth redirect + PKCE exchange, refresh rotation, user update, logout; admin user CRUD (service_role or `ADMIN_USER_IDS`).
+- [x] RLS impersonation (`begin_rls`, `with_rls_claims`) used by every user-facing query.
+- [x] Automated migrations on boot over the direct connection.
+- [x] Storage: per-app buckets, signed upload/download URLs, image transforms, streaming upload/download proxy, batch delete, list, TUS resumable upload details.
+- [x] Realtime: `/ws` rooms, broadcast, presence, private `workspace:<id>` rooms, Postgres CDC via `NOTIFY xbase_changes`, token refresh, heartbeats.
+- [x] CRUD: workspaces, memberships (roles owner/admin/member/viewer), invitations (hashed single-use tokens, `xbase.accept_invitation`).
+- [x] Billing: Stripe + LemonSqueezy webhook verification, idempotent event log, plan/status/period sync; durable background job queue.
+- [x] pgvector embeddings with server-side embedding (OpenAI-compatible), metadata filters, reindex job.
+- [x] Per-key/user/IP token-bucket rate limiting; hashed scoped API keys (`x-api-key`).
+- [x] Prometheus `/metrics`; Go backend template; ops: secrets bootstrap (fixed ANON/SERVICE key mismatch), SMTP/OAuth/SAML override, encrypted backups + restore + systemd timer, DB branching, monitoring + alerts.
+
+Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching).
 
 ---
 
