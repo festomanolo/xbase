@@ -22,6 +22,7 @@ pub struct Metrics {
     pub in_flight: AtomicU64,
     pub latency_micros_sum: AtomicU64,
     pub rate_limited: AtomicU64,
+    pub rate_limit_fallbacks: AtomicU64,
     pub jobs_succeeded: AtomicU64,
     pub jobs_failed: AtomicU64,
 }
