@@ -46,25 +46,22 @@ xbase/
 │       └── routes.rs      # router assembly + HTTP tests
 ├── go-backend/                        # Go service template (pgx, golang-jwt)
 ├── docker/
-│   ├── docker-compose.saas.yml        # Multi-SaaS Rust backend + Caddy reverse proxy stack
-│   └── Caddyfile                      # Automatic HTTPS reverse proxy for Supabase & SaaS apps
-├── migrations/
-│   └── 0001_init_multi_saas.sql       # Multi-SaaS schema & Row-Level Security (RLS) starter
-└── backend/                           # Rust (Axum + SQLx) backend optimized for Supavisor (port 6543)
-    ├── Cargo.toml
-    ├── Dockerfile
-    ├── .env.example
-    └── src/
-        ├── main.rs                    # Entrypoint & graceful shutdown
-        ├── config.rs                  # Environment & pool configuration
-        ├── db.rs                      # Supavisor-compatible PgPool (statement cache disabled)
-        ├── auth.rs                    # Local Supabase JWT verification middleware
-        └── routes.rs                  # Health, DB diagnostics, and multi-SaaS tenant endpoints
+│   ├── docker-compose.saas.yml        # Rust + Go SaaS backends + Caddy
+│   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
+│   ├── supabase-auth.override.yml     # OAuth providers, SAML, SMTP tuning for GoTrue
+│   ├── monitoring/                    # scrape config, alert rules, receivers
+│   └── Caddyfile
+└── scripts/
+    ├── bootstrap-supabase.sh          # clone Supabase docker + generate ALL secrets consistently
+    ├── backup-postgres.sh             # encrypted pg_dump → S3 / R2 / B2 (age or openssl + rclone)
+    ├── restore-postgres.sh            # verified restore into a fresh database
+    ├── install-backups.sh             # nightly systemd timer
+    └── db-branch.sh                   # ephemeral per-PR database branches
 ```
 
 ---
 
-## Part 1: Self-Host Supabase on Your VPS (Official Docker Compose)
+## Part 1: Deploy on a VPS
 
 ### Prerequisites
 
