@@ -651,6 +651,9 @@ async fn handle_client_msg(
             if hub.broadcast(&room, conn.id, &msg) { None } else { err("join the room first") }
         }
         ClientMsg::Track { room, state } => {
+            if hub.cluster_enabled() && state.to_string().len() > MAX_CLUSTER_BYTES / 2 {
+                return err("presence state too large for clustered realtime (max 3500 bytes)");
+            }
             if hub.track(&room, conn.id, Some(state)) { None } else { err("join the room first") }
         }
         ClientMsg::Untrack { room } => {
@@ -713,9 +716,181 @@ pub async fn run_change_listener(hub: Arc<RealtimeHub>, direct_url: String) {
     }
 }
 
+/// Drains hub → Postgres: every locally originated envelope becomes a
+/// `pg_notify`. Goes through the request pool (NOTIFY is fine in transaction mode).
+pub async fn run_cluster_publisher(pool: sqlx::PgPool, channel: String, mut rx: mpsc::Receiver<String>) {
+    while let Some(payload) = rx.recv().await {
+        if let Err(e) = sqlx::query("select pg_notify($1, $2)")
+            .bind(&channel)
+            .bind(&payload)
+            .execute(&pool)
+            .await
+        {
+            tracing::warn!(error = %e, "cluster publish failed");
+        }
+    }
+}
+
+/// Receives other replicas' envelopes on a dedicated session connection, with
+/// reconnect + backoff (a dropped LISTEN connection would otherwise silently
+/// stop all cross-replica delivery).
+pub async fn run_cluster_listener(hub: Arc<RealtimeHub>, direct_url: String, channel: String) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match PgListener::connect(&direct_url).await {
+            Ok(mut listener) => {
+                if let Err(e) = listener.listen(&channel).await {
+                    tracing::warn!(error = %e, "cluster LISTEN failed");
+                } else {
+                    tracing::info!(%channel, "realtime cluster listener connected");
+                    backoff = Duration::from_secs(1);
+                    hub.request_all_presence();
+                    loop {
+                        match listener.recv().await {
+                            Ok(n) => match serde_json::from_str::<Envelope>(n.payload()) {
+                                Ok(env) => hub.apply_remote(env),
+                                Err(e) => tracing::debug!(error = %e, "ignoring malformed cluster payload"),
+                            },
+                            Err(e) => {
+                                tracing::warn!(error = %e, "cluster listener disconnected");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "cluster listener connect failed"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// Spawns publisher, listener and the presence heartbeat for a clustered hub.
+pub fn spawn_cluster(state: &AppState, direct_url: String) {
+    let hub = state.realtime.clone();
+    let channel = room_channel(&state.config.app_id);
+    let (tx, rx) = mpsc::channel::<String>(1024);
+    hub.enable_cluster(&state.config.app_id, tx);
+    tokio::spawn(run_cluster_publisher(state.pool.clone(), channel.clone(), rx));
+    tokio::spawn(run_cluster_listener(hub.clone(), direct_url, channel));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(PRESENCE_SYNC_EVERY);
+        loop {
+            tick.tick().await;
+            hub.cluster_tick();
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two hubs wired back-to-back, as two replicas sharing one NOTIFY channel.
+    fn pair() -> (Arc<RealtimeHub>, Arc<RealtimeHub>, mpsc::Receiver<String>, mpsc::Receiver<String>) {
+        let (a, b) = (Arc::new(RealtimeHub::new()), Arc::new(RealtimeHub::new()));
+        let (atx, arx) = mpsc::channel(64);
+        let (btx, brx) = mpsc::channel(64);
+        a.enable_cluster("app", atx);
+        b.enable_cluster("app", btx);
+        (a, b, arx, brx)
+    }
+
+    /// Delivers everything `from` published to `to`, like the Postgres round trip.
+    fn pump(rx: &mut mpsc::Receiver<String>, to: &RealtimeHub) {
+        while let Ok(raw) = rx.try_recv() {
+            to.apply_remote(serde_json::from_str(&raw).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_and_presence_cross_replicas() {
+        let (a, b, mut a_out, mut b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        let (ua, ub) = (Uuid::new_v4(), Uuid::new_v4());
+
+        a.join("lobby", 1, ua, a_tx);
+        b.join("lobby", 2, ub, b_tx);
+        pump(&mut a_out, &b);
+        pump(&mut b_out, &a);
+
+        // broadcast on A reaches the member on B
+        assert!(a.broadcast("lobby", 1, &json!({"type":"broadcast","payload":42})));
+        pump(&mut a_out, &b);
+        let got: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(got["payload"], 42);
+
+        // presence on A is visible to B members and in B's snapshot for late joiners
+        assert!(a.track("lobby", 1, Some(json!({"status":"online"}))));
+        pump(&mut a_out, &b);
+        let diff: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(diff["type"], "presence_diff");
+        assert_eq!(diff["joins"]["1"]["state"]["status"], "online");
+
+        let (c_tx, _c_rx) = mpsc::channel(16);
+        let snap = b.join("lobby", 3, Uuid::new_v4(), c_tx);
+        assert_eq!(snap["1"]["user_id"], json!(ua));
+
+        // leaving on A emits a leave diff on B
+        a.leave("lobby", 1);
+        pump(&mut a_out, &b);
+        let leave: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(leave["leaves"]["1"]["state"]["status"], "online");
+    }
+
+    #[tokio::test]
+    async fn new_replica_member_gets_existing_presence_via_sync() {
+        let (a, b, mut a_out, mut b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        a.join("lobby", 1, Uuid::new_v4(), a_tx);
+        a.track("lobby", 1, Some(json!({"n":1})));
+        pump(&mut a_out, &b); // B has no members yet: ignored
+
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        let snap = b.join("lobby", 2, Uuid::new_v4(), b_tx);
+        assert_eq!(snap, json!({}), "nothing replicated yet");
+
+        pump(&mut b_out, &a); // A sees the Req and answers with a Sync
+        pump(&mut a_out, &b);
+        let diff: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(diff["joins"]["1"]["state"]["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn silent_replica_presence_expires() {
+        let (a, b, mut a_out, _b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        a.join("lobby", 1, Uuid::new_v4(), a_tx);
+        b.join("lobby", 2, Uuid::new_v4(), b_tx);
+        a.track("lobby", 1, Some(json!({"x":1})));
+        pump(&mut a_out, &b);
+        let _join: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+
+        b.expire_remote(Duration::ZERO);
+        let leave: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(leave["leaves"]["1"]["state"]["x"], 1);
+    }
+
+    #[test]
+    fn ignores_own_and_foreign_app_envelopes() {
+        let (a, _b, _ao, _bo) = pair();
+        let (tx, mut rx) = mpsc::channel(4);
+        a.join("lobby", 1, Uuid::new_v4(), tx);
+        let own = Envelope::Msg { o: a.origin.clone(), app: "app".into(), room: "lobby".into(), msg: json!({"type":"broadcast"}) };
+        let foreign = Envelope::Msg { o: "other".into(), app: "different-app".into(), room: "lobby".into(), msg: json!({"type":"broadcast"}) };
+        a.apply_remote(own);
+        a.apply_remote(foreign);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn channel_names_are_identifier_safe() {
+        assert_eq!(room_channel("saas-app-1"), "xbase_rt_saas_app_1");
+        assert!(room_channel(&"x".repeat(200)).len() <= 63);
+    }
 
     #[tokio::test]
     async fn rooms_broadcast_and_presence() {
