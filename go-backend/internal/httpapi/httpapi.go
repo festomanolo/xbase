@@ -20,7 +20,6 @@ import (
 
 	"github.com/festomanolo/xbase/go-backend/internal/auth"
 	"github.com/festomanolo/xbase/go-backend/internal/config"
-	"github.com/festomanolo/xbase/go-backend/internal/db"
 	"github.com/festomanolo/xbase/go-backend/internal/ratelimit"
 )
 
@@ -30,6 +29,8 @@ type Server struct {
 	limiter *ratelimit.Limiter
 	metrics *metrics
 	hub     *hub
+	jobs    *jobQueue
+	rest    *restCatalog
 	// httpc talks to Supabase Storage and the embeddings provider. No overall
 	// Timeout: uploads/downloads stream; per-call deadlines come from contexts.
 	httpc *http.Client
@@ -40,6 +41,8 @@ func New(cfg *config.Config, pool *pgxpool.Pool, limiter *ratelimit.Limiter) *Se
 		cfg: cfg, pool: pool, limiter: limiter,
 		metrics: &metrics{},
 		hub:     newHub(cfg.AppID),
+		jobs:    newJobQueue(),
+		rest:    newRestCatalog(),
 		httpc:   &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 8, IdleConnTimeout: 60 * time.Second}},
 	}
 }
@@ -54,11 +57,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /health/db", s.healthDB)
 	mux.Handle("GET /api/v1/me", s.requireUser(s.me))
-	mux.Handle("GET /api/v1/workspaces", s.requireUser(s.listWorkspaces))
-	mux.Handle("POST /api/v1/workspaces", s.requireUser(s.createWorkspace))
-	mux.Handle("GET /api/v1/workspaces/{id}", s.requireUser(s.getWorkspace))
-	mux.HandleFunc("GET /api/v1/server/whoami", s.whoami)
 	mux.HandleFunc("GET /metrics", s.metricsHandler)
+	s.gotrueRoutes(mux)
+	s.workspaceRoutes(mux)
+	s.apiKeyRoutes(mux)
+	s.restRoutes(mux)
 	s.storageRoutes(mux)
 	s.vectorRoutes(mux)
 	s.billingRoutes(mux)
@@ -277,111 +280,4 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"user_id": c.Subject, "email": c.Email, "role": c.Role,
 		"app_metadata": c.Raw["app_metadata"], "user_metadata": c.Raw["user_metadata"],
 	})
-}
-
-type Workspace struct {
-	ID                 string     `json:"id"`
-	AppSlug            string     `json:"app_slug"`
-	Name               string     `json:"name"`
-	OwnerID            string     `json:"owner_id"`
-	Plan               string     `json:"plan"`
-	SubscriptionStatus *string    `json:"subscription_status"`
-	CurrentPeriodEnd   *time.Time `json:"current_period_end"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-}
-
-const workspaceColumns = `id::text, app_slug, name, owner_id::text, plan, subscription_status,
-	current_period_end, created_at, updated_at`
-
-func scanWorkspace(row pgx.Row) (Workspace, error) {
-	var ws Workspace
-	err := row.Scan(&ws.ID, &ws.AppSlug, &ws.Name, &ws.OwnerID, &ws.Plan,
-		&ws.SubscriptionStatus, &ws.CurrentPeriodEnd, &ws.CreatedAt, &ws.UpdatedAt)
-	return ws, err
-}
-
-func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
-	out := []Workspace{}
-	err := db.WithRLS(r.Context(), s.pool, claimsFrom(r), func(tx pgx.Tx) error {
-		rows, err := tx.Query(r.Context(),
-			"select "+workspaceColumns+" from xbase.workspaces where app_slug = $1 order by created_at desc", s.cfg.AppID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			ws, err := scanWorkspace(rows)
-			if err != nil {
-				return err
-			}
-			out = append(out, ws)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		dbError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (s *Server) createWorkspace(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid JSON body")
-		return
-	}
-	name := strings.TrimSpace(body.Name)
-	if name == "" || len([]rune(name)) > 120 {
-		writeError(w, http.StatusBadRequest, "bad_request", "name must be 1-120 characters")
-		return
-	}
-	claims := claimsFrom(r)
-	var ws Workspace
-	err := db.WithRLS(r.Context(), s.pool, claims, func(tx pgx.Tx) error {
-		var err error
-		ws, err = scanWorkspace(tx.QueryRow(r.Context(),
-			"insert into xbase.workspaces (app_slug, name, owner_id) values ($1, $2, $3::uuid) returning "+workspaceColumns,
-			s.cfg.AppID, name, claims.Subject))
-		return err
-	})
-	if err != nil {
-		dbError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, ws)
-}
-
-func (s *Server) getWorkspace(w http.ResponseWriter, r *http.Request) {
-	var ws Workspace
-	err := db.WithRLS(r.Context(), s.pool, claimsFrom(r), func(tx pgx.Tx) error {
-		var err error
-		ws, err = scanWorkspace(tx.QueryRow(r.Context(),
-			"select "+workspaceColumns+" from xbase.workspaces where id = $1::uuid and app_slug = $2",
-			r.PathValue("id"), s.cfg.AppID))
-		return err
-	})
-	if err != nil {
-		dbError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, ws)
-}
-
-// whoami authenticates an x-api-key created by the Rust backend.
-func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
-	raw := strings.TrimSpace(r.Header.Get(auth.APIKeyHeader))
-	if raw == "" {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Missing or malformed x-api-key")
-		return
-	}
-	k, apiErr := s.authenticateKey(r.Context(), raw)
-	if apiErr != nil {
-		writeAPIError(w, apiErr)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"key_id": k.KeyID, "workspace_id": k.WorkspaceID, "scopes": k.Scopes})
 }
