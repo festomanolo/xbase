@@ -62,10 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.jobs_enabled {
         tasks.extend(jobs::spawn_workers(&state, shutdown_rx.clone()));
     }
+    if config.realtime_cluster && !config.realtime_enabled {
+        tracing::warn!("REALTIME_CLUSTER=true has no effect while REALTIME_ENABLED=false");
+    }
     if config.realtime_enabled {
         match &config.direct_database_url {
             Some(url) => {
                 tokio::spawn(realtime::run_change_listener(state.realtime.clone(), url.clone()));
+                if config.realtime_cluster {
+                    realtime::spawn_cluster(&state, url.clone());
+                    tracing::info!("realtime cluster fan-out enabled");
+                }
             }
             None => tracing::warn!("DIRECT_DATABASE_URL not set; realtime database changes disabled"),
         }
