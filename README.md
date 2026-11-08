@@ -22,10 +22,29 @@ A self-hosted, **Supabase-compatible backend platform** for running **10+ SaaS a
 
 ```text
 xbase/
-├── README.md                          # Complete VPS setup & architecture guide
-├── .env.example                       # Environment template for Supabase + Rust backend
-├── scripts/
-│   └── bootstrap-supabase.sh          # Automated official Supabase Docker setup + secret generator
+├── migrations/                        # Embedded into the Rust binary, applied on boot
+│   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
+│   ├── 0002_platform_core.sql         # members, invitations, API keys, jobs, webhooks, CDC triggers, RLS
+│   └── 0003_vector_embeddings.sql     # pgvector embeddings + HNSW index
+├── backend/                           # Rust platform API (Axum 0.7, SQLx 0.8, Tokio)
+│   └── src/
+│       ├── main.rs        # boot: migrations, pool, workers, CDC listener, graceful shutdown
+│       ├── config.rs      # every environment variable
+│       ├── db.rs          # Supavisor pool (statement_cache_capacity(0)), migrator
+│       ├── rls.rs         # begin_rls / with_rls_claims — native Postgres RLS impersonation
+│       ├── auth.rs        # local HS256 JWT verification, Principal (JWT | API key), admin gate
+│       ├── gotrue.rs      # sign-up/in, OTP, magic link, OAuth+PKCE, refresh, recovery, admin users
+│       ├── workspaces.rs  # workspace / member / invitation CRUD
+│       ├── api_keys.rs    # hashed x-api-key management + authentication
+│       ├── storage.rs     # buckets, signed URLs, streaming upload/download, TUS, image transforms
+│       ├── realtime.rs    # /ws rooms, broadcast, presence, Postgres change streams
+│       ├── vector.rs      # pgvector upsert/search, server-side embeddings, reindex job
+│       ├── billing.rs     # Stripe + LemonSqueezy webhooks → workspace plan sync
+│       ├── jobs.rs        # durable SKIP LOCKED job queue with retries/backoff
+│       ├── rate_limit.rs  # sharded token bucket per API key / user / IP
+│       ├── metrics.rs     # Prometheus /metrics
+│       └── routes.rs      # router assembly + HTTP tests
+├── go-backend/                        # Go service template (pgx, golang-jwt)
 ├── docker/
 │   ├── docker-compose.saas.yml        # Multi-SaaS Rust backend + Caddy reverse proxy stack
 │   └── Caddyfile                      # Automatic HTTPS reverse proxy for Supabase & SaaS apps
