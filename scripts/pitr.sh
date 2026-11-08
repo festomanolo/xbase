@@ -91,6 +91,20 @@ psql_admin() {
   docker exec "$DB_CONTAINER" psql -U "$PGUSER_ADMIN" -d postgres -v ON_ERROR_STOP=1 -qAt "$@"
 }
 
+# The Supabase image's pg_hba.conf has no `replication` rules at all (`all` does not
+# match the replication pseudo-database), so pg_basebackup is refused out of the
+# box. Allow it for the admin role over the container-local socket only, which is
+# the same trust `local all supabase_admin trust` already grants. Idempotent, and
+# re-applied on every base backup because the file lives in the container's own
+# filesystem and is lost when the container is recreated.
+ensure_replication_access() {
+  local hba
+  hba="$(psql_admin -c 'show hba_file')"
+  docker exec -u root "$DB_CONTAINER" sh -c \
+    "grep -Eq '^local[[:space:]]+replication[[:space:]]+$PGUSER_ADMIN[[:space:]]' '$hba' || echo 'local replication $PGUSER_ADMIN trust' >> '$hba'"
+  psql_admin -c 'select pg_reload_conf()' >/dev/null
+}
+
 # --- ship-wal -----------------------------------------------------------------
 cmd_ship_wal() {
   need_remote
@@ -136,6 +150,7 @@ cmd_base_backup() {
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   log "base backup $stamp ..."
+  ensure_replication_access
 
   # -X fetch bundles the WAL needed for consistency; -D - streams the tar so no
   # extra disk is needed on the VPS. rcat uploads it as it is produced.
@@ -190,7 +205,10 @@ cmd_prune() {
 
   # WAL is only useful from the oldest base we still keep (minus a day of slack).
   local wal_hours=$(( (now - $(stamp_to_epoch "$oldest_kept")) / 3600 + 24 ))
-  rclone delete "$REMOTE/wal" --min-age "${wal_hours}h" || true
+  # (skip while no WAL has been shipped yet: rclone errors on a missing directory)
+  if rclone lsf "$REMOTE/wal" >/dev/null 2>&1; then
+    rclone delete "$REMOTE/wal" --min-age "${wal_hours}h" || true
+  fi
 }
 
 # --- status -------------------------------------------------------------------

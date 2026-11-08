@@ -107,17 +107,23 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 
 Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching) — **that run predates the items marked "Needs live verification" below.**
 
-### Needs live verification
+### Live verification (2026-11-08)
 
-The horizontal-scaling, REST, storage-policy, PITR and Go-parity work was written and unit-tested **without a running Postgres/Docker** (Rust 54 tests, Go `-race` suite, `bash -n`, YAML parse). Not yet exercised against a real database or Supabase stack:
+Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25.7`, two replicas of each backend, and (for PITR) a Linux container with `rclone` + `age`. All passed after the fixes below:
 
-1. Migrations `0004`/`0005` (SQL syntax, `rate_limit_check` under concurrency, the `storage.objects` DO block on a real `supabase_storage_admin`-owned table).
-2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
-3. Two real replicas with `REALTIME_CLUSTER=true` (NOTIFY round trip, reconnect after killing the LISTEN connection).
-4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
-5. Go billing/vector SQL (`::extensions.vector`, the subscription update) against the real schema.
+| Area | What was exercised |
+| :--- | :--- |
+| Migrations `0001`–`0005` | Applied in order as `postgres`. `0005` installs the policies on the real `supabase_storage_admin`-owned `storage.objects`; the unprivileged-role skip path and `apply-storage-policies.sh` also work. |
+| Shared limiter | `rate_limit_check`: sequential refill, key isolation, grants; 200 concurrent calls on a burst of 50 allowed exactly 50. Through two real replicas (Rust and Go) the global limit held. |
+| REST (Rust) | 27 HTTP checks: CRUD, filters/order/paging/count, upsert, bad casts → 400, SQL-looking values stored literally, RLS isolation between users, internal schemas refused. |
+| Realtime cluster (Rust + Go) | Real WebSockets on two replicas: cross-replica broadcast and presence, late-joiner sync, leave diffs, oversize rejection, DB change feed on both replicas, and recovery after every `LISTEN` backend was terminated. |
+| Storage (Rust + Go) | 25 checks each through the proxy to the real Storage API: owner/viewer/outsider RLS, signed URLs (and fetching them), API key confined to `<workspace_id>/`, traversal, user-only TUS. |
+| Go vector / billing | pgvector search (`::extensions.vector`), metadata filter, upsert, key scope + workspace binding, Stripe and LemonSqueezy plan sync, idempotent replay, bad/stale signatures. |
+| PITR | WAL archiving from `supabase-pitr.override.yml`, base backup → age → rclone, WAL shipping, then `DROP TABLE` and a restore to a point just before it (150 rows back, 0 rows from after the target). `archive_command` verified for new / identical / different files. |
 
-Run these once before relying on them; `pitr.sh restore latest` doubles as the PITR rehearsal.
+Bugs found and fixed by this run: (1) REST batch insert forced omitted columns to `NULL` instead of their `DEFAULT` (now one `INSERT` per distinct key set); (2) `pg_basebackup` was refused because the Supabase image's `pg_hba.conf` has no `replication` rule (`pitr.sh` now adds `local replication <admin> trust` idempotently before each base backup); plus a noisy first-run prune error.
+
+Still not covered: GoTrue/auth flows, the Rust job worker path for billing, image transforms, TUS uploads, and a real S3/R2 remote for `rclone` (a local-directory remote was used). The shared limiter fails open to the per-replica bucket when its query exceeds 250 ms; with a tiny pool (`DB_MAX_CONNECTIONS=5`) a burst of ~150 concurrent requests per replica caused that fallback and let ~5% more than the global limit through — size the pool for your concurrency or accept that degradation.
 
 ---
 
