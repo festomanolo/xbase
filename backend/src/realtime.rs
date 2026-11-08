@@ -134,6 +134,11 @@ pub struct RealtimeHub {
     changes: broadcast::Sender<Arc<ChangeEvent>>,
     next_id: AtomicU64,
     pub connections: AtomicU64,
+    origin: String,
+    cluster: OnceLock<ClusterLink>,
+    pub cluster_published: AtomicU64,
+    pub cluster_received: AtomicU64,
+    pub cluster_dropped: AtomicU64,
 }
 
 impl Default for RealtimeHub {
@@ -150,6 +155,135 @@ impl RealtimeHub {
             changes,
             next_id: AtomicU64::new(1),
             connections: AtomicU64::new(0),
+            origin: Uuid::new_v4().to_string(),
+            cluster: OnceLock::new(),
+            cluster_published: AtomicU64::new(0),
+            cluster_received: AtomicU64::new(0),
+            cluster_dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// Turns on cross-replica fan-out. Connection ids switch to a random 32-bit
+    /// prefix (kept below 2^53 so JavaScript clients read them exactly) so ids
+    /// — which double as presence keys — never collide between replicas.
+    pub fn enable_cluster(&self, app_id: &str, tx: mpsc::Sender<String>) {
+        if self.cluster.set(ClusterLink { tx, app: app_id.to_string() }).is_ok() {
+            self.next_id.store(((rand::random::<u32>() as u64) << 20) | 1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn cluster_enabled(&self) -> bool {
+        self.cluster.get().is_some()
+    }
+
+    fn publish(&self, env: &Envelope) {
+        let Some(link) = self.cluster.get() else { return };
+        let sent = serde_json::to_string(env)
+            .ok()
+            .filter(|s| s.len() <= MAX_ENVELOPE_BYTES)
+            .is_some_and(|s| link.tx.try_send(s).is_ok());
+        let counter = if sent { &self.cluster_published } else { &self.cluster_dropped };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn for_us(&self, origin: &str, app: &str) -> bool {
+        origin != self.origin && self.cluster.get().is_some_and(|l| l.app == app)
+    }
+
+    /// Applies an envelope published by another replica.
+    pub fn apply_remote(&self, env: Envelope) {
+        match env {
+            Envelope::Msg { o, app, room, msg } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let mut rooms = self.rooms.lock().unwrap();
+                let Some(r) = rooms.get_mut(&room) else { return };
+                if msg["type"] == "presence_diff" {
+                    apply_remote_diff(r, &o, &msg);
+                }
+                fan_out(r, None, &msg);
+            }
+            Envelope::Sync { o, app, room, presence } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let mut rooms = self.rooms.lock().unwrap();
+                let Some(r) = rooms.get_mut(&room) else { return };
+                apply_remote_sync(r, &room, &o, presence);
+            }
+            Envelope::Req { o, app, room } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let rooms = self.rooms.lock().unwrap();
+                if let Some(r) = rooms.get(&room) {
+                    self.publish_sync(&room, r);
+                }
+            }
+        }
+    }
+
+    fn publish_sync(&self, room: &str, r: &Room) {
+        let presence = local_presence(r);
+        if presence.is_empty() {
+            return;
+        }
+        if let Some(link) = self.cluster.get() {
+            self.publish(&Envelope::Sync {
+                o: self.origin.clone(),
+                app: link.app.clone(),
+                room: room.to_string(),
+                presence,
+            });
+        }
+    }
+
+    /// Asks other replicas for presence of every room we hold (after (re)connecting).
+    pub fn request_all_presence(&self) {
+        let Some(link) = self.cluster.get() else { return };
+        let rooms = self.rooms.lock().unwrap();
+        for room in rooms.keys() {
+            self.publish(&Envelope::Req { o: self.origin.clone(), app: link.app.clone(), room: room.clone() });
+        }
+    }
+
+    /// Periodic housekeeping: re-announce our presence and expire entries from
+    /// replicas that went silent.
+    pub fn cluster_tick(&self) {
+        {
+            let rooms = self.rooms.lock().unwrap();
+            for (name, r) in rooms.iter() {
+                self.publish_sync(name, r);
+            }
+        }
+        self.expire_remote(REMOTE_PRESENCE_TTL);
+    }
+
+    fn expire_remote(&self, ttl: Duration) {
+        let mut rooms = self.rooms.lock().unwrap();
+        for (name, r) in rooms.iter_mut() {
+            let dead: Vec<String> = r
+                .remote
+                .iter()
+                .filter(|(_, e)| e.seen.elapsed() > ttl)
+                .map(|(k, _)| k.clone())
+                .collect();
+            if dead.is_empty() {
+                continue;
+            }
+            let leaves: serde_json::Map<String, Value> = dead
+                .into_iter()
+                .filter_map(|k| {
+                    r.remote
+                        .remove(&k)
+                        .map(|e| (k, json!({ "user_id": e.user_id, "state": e.state })))
+                })
+                .collect();
+            fan_out(r, None, &json!({ "type": "presence_diff", "room": name, "joins": {}, "leaves": leaves }));
         }
     }
 
@@ -160,6 +294,7 @@ impl RealtimeHub {
     fn join(&self, room: &str, conn: ConnId, user_id: Uuid, tx: mpsc::Sender<Arc<str>>) -> Value {
         let mut rooms = self.rooms.lock().unwrap();
         let r = rooms.entry(room.to_string()).or_default();
+        let first_local = r.members.is_empty();
         r.members.insert(conn, RoomMember { tx, user_id, presence: None });
         presence_snapshot(r)
     }
