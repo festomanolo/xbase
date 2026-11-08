@@ -95,3 +95,36 @@ func run() error {
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
 }
+
+// localGet fetches 127.0.0.1:$PORT<path> within 3 s, sending METRICS_TOKEN as a bearer token when set.
+func localGet(path string) (int, string, error) {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	if t := os.Getenv("METRICS_TOKEN"); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(body), nil
+}
+
+// exitCode: 0 = expected status, 1 = other status, 2 = could not connect.
+func exitCode(code int, err error, want int) int {
+	switch {
+	case err != nil:
+		return 2
+	case code == want:
+		return 0
+	}
+	return 1
+}
