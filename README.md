@@ -105,8 +105,8 @@ Data isolation between apps comes from `app_slug` predicates and RLS. Storage is
 Self-hosted Studio has no provider UI. Set the credentials in `supabase-project/.env` and layer the override file:
 
 ```bash
-chmod +x scripts/bootstrap-supabase.sh
-./scripts/bootstrap-supabase.sh
+cd supabase-project
+docker compose -f docker-compose.yml -f ../docker/supabase-auth.override.yml up -d auth
 ```
 
 Or perform the steps manually:
