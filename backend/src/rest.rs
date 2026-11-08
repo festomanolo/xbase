@@ -375,8 +375,7 @@ pub fn build_insert(
     merge: bool,
 ) -> ApiResult<Built> {
     let rows = body_rows(body)?;
-    let used = body_columns(cols, &rows)?;
-    let names = used.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
+    body_columns(cols, &rows)?; // validates every key against the catalog
     let target = format!("{}.{}", q(schema), q(table));
 
     let conflict = match on_conflict.filter(|c| !c.is_empty()) {
