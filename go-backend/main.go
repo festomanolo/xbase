@@ -23,6 +23,25 @@ import (
 )
 
 func main() {
+	// Operator subcommands (the distroless image has no curl): handled before any
+	// configuration is loaded, so they never need DATABASE_URL.
+	//   xbase-go-backend healthcheck     exit 0 iff GET /health is 200
+	//   xbase-go-backend probe [/path]   print the response body (default /metrics), exit 0 iff 200
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			code, _, err := localGet("/health")
+			os.Exit(exitCode(code, err, 200))
+		case "probe":
+			path := "/metrics"
+			if len(os.Args) > 2 {
+				path = os.Args[2]
+			}
+			code, body, err := localGet(path)
+			fmt.Print(body)
+			os.Exit(exitCode(code, err, 200))
+		}
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
