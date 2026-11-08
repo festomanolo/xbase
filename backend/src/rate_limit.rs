@@ -1,5 +1,13 @@
-//! Sharded in-memory token-bucket rate limiter, keyed per API key, per user
-//! (JWT `sub`) or per client IP — in that order of precedence.
+//! Token-bucket rate limiter, keyed per API key, per user (JWT `sub`) or per
+//! client IP — in that order of precedence.
+//!
+//! Two backends (`RATE_LIMIT_BACKEND`):
+//! * `memory`   — sharded in-process buckets. Fastest; each replica enforces the
+//!   limit on its own, so N replicas allow roughly N× the configured rate.
+//! * `postgres` — one bucket per key shared by every replica via
+//!   `xbase.rate_limit_check()` (migration 0004). The limit is global. If the
+//!   database is slow or down the limiter fails *open to the local bucket*, so a
+//!   database blip degrades to per-replica limiting instead of an outage.
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -19,7 +27,7 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::{api_keys, auth, state::AppState};
+use crate::{api_keys, auth, config::RateLimitBackend, state::AppState};
 
 const SHARDS: usize = 16;
 
