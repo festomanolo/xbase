@@ -77,10 +77,12 @@ pub struct Column {
     pub ty: String,
 }
 
+type CacheEntry = (Instant, Arc<Vec<Column>>);
+
 /// Short-lived cache of table definitions (columns + types).
 #[derive(Default)]
 pub struct SchemaCache {
-    inner: Mutex<HashMap<(String, String), (Instant, Arc<Vec<Column>>)>>,
+    inner: Mutex<HashMap<(String, String), CacheEntry>>,
 }
 
 impl SchemaCache {
