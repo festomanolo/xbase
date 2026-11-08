@@ -15,7 +15,9 @@ xbase/
 ├── migrations/                        # Embedded via sqlx::migrate!, applied on boot over port 5432
 │   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
 │   ├── 0002_platform_core.sql         # members, invitations, api_keys, jobs, webhook_events, CDC triggers, RLS + grants
-│   └── 0003_vector_embeddings.sql     # pgvector xbase.embeddings (vector(1536), HNSW)
+│   ├── 0003_vector_embeddings.sql     # pgvector xbase.embeddings (vector(1536), HNSW)
+│   ├── 0004_shared_rate_limit.sql     # UNLOGGED xbase.rate_limits + xbase.rate_limit_check() (shared token bucket)
+│   └── 0005_storage_policies.sql      # xbase.can_access_storage_object() + storage.objects policies (skips if not owner)
 ├── backend/src/                       # Rust (Axum 0.7 + SQLx 0.8 + Tokio)
 │   ├── main.rs       # boot: migrations → pool → register app → job workers → CDC listener → serve
 │   ├── config.rs     # AppConfig (all env vars; AppConfig::for_tests())
