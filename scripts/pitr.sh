@@ -91,6 +91,9 @@ psql_admin() {
   docker exec "$DB_CONTAINER" psql -U "$PGUSER_ADMIN" -d postgres -v ON_ERROR_STOP=1 -qAt "$@"
 }
 
+# The Supabase image's pg_hba.conf has no `replication` rules at all (`all` does not
+# match the replication pseudo-database), so pg_basebackup is refused out of the
+# box. Allow it for the admin role over the container-local socket only, which is
 # --- ship-wal -----------------------------------------------------------------
 cmd_ship_wal() {
   need_remote
