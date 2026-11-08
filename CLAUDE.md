@@ -105,7 +105,19 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 - [x] **Go parity:** storage, vector (no reindex job), billing (plan sync inline in the webhook transaction), realtime incl. cluster mode, shared rate limiter, `/metrics`, service-role admin gate.
 - [x] Prometheus `/metrics`; Go backend template; ops: secrets bootstrap (fixed ANON/SERVICE key mismatch), SMTP/OAuth/SAML override, encrypted backups + restore + systemd timer, DB branching, monitoring + alerts.
 
-Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching).
+Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching) — **that run predates the items marked "Needs live verification" below.**
+
+### Needs live verification
+
+The horizontal-scaling, REST, storage-policy, PITR and Go-parity work was written and unit-tested **without a running Postgres/Docker** (Rust 54 tests, Go `-race` suite, `bash -n`, YAML parse). Not yet exercised against a real database or Supabase stack:
+
+1. Migrations `0004`/`0005` (SQL syntax, `rate_limit_check` under concurrency, the `storage.objects` DO block on a real `supabase_storage_admin`-owned table).
+2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
+3. Two real replicas with `REALTIME_CLUSTER=true` (NOTIFY round trip, reconnect after killing the LISTEN connection).
+4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
+5. Go billing/vector SQL (`::extensions.vector`, the subscription update) against the real schema.
+
+Run these once before relying on them; `pitr.sh restore latest` doubles as the PITR rehearsal.
 
 ---
 
