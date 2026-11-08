@@ -44,6 +44,8 @@ xbase/
 │   ├── docker-compose.saas.yml        # Rust saas-api-1 + Go saas-api-2 + Caddy (build context = repo root)
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
 │   ├── supabase-auth.override.yml     # GoTrue OAuth/SAML/SMTP env layer
+│   ├── supabase-pitr.override.yml     # enables WAL archiving (archive_mode/archive_command) on the Supabase db service
+│   ├── storage-policies.sql           # same policy SQL as migration 0005, for running as the DB superuser
 │   ├── monitoring/                    # prometheus.yml, alerts.yml, alertmanager.yml, grafana datasource
 │   └── Caddyfile
 └── scripts/
