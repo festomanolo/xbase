@@ -712,7 +712,10 @@ mod tests {
         // different key sets => separate INSERTs, so "done" keeps its DEFAULT for the first row
         assert!(b.sql.contains(r#"insert into "public"."todos" ("title") select "title" from jsonb_populate_recordset(null::"public"."todos", $1::jsonb)"#), "{}", b.sql);
         assert!(b.sql.contains(r#"("title", "done") select "title", "done" from jsonb_populate_recordset(null::"public"."todos", $2::jsonb)"#), "{}", b.sql);
-        assert!(b.sql.contains(r#"insert into "public"."todos" ("title", "done") select "title", "done" from jsonb_populate_recordset"#), "{}", b.sql);
+        assert_eq!(b.binds.len(), 2);
+        // identical key sets share one INSERT
+        let same = build_insert("public", "todos", &cols(), &json!([{"title":"a"},{"title":"b"}]), None, false).unwrap();
+        assert_eq!(same.binds.len(), 1);
         assert!(build_insert("public", "todos", &cols(), &json!({"nope": 1}), None, false).is_err());
         assert!(build_insert("public", "todos", &cols(), &json!([]), None, false).is_err());
         assert!(build_insert("public", "todos", &cols(), &json!(5), None, false).is_err());
