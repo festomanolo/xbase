@@ -27,6 +27,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(vector::router())
         .merge(billing::router())
         .merge(realtime::router())
+        .merge(rest::router())
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit::middleware))
         .layer(middleware::from_fn_with_state(state.clone(), metrics::track))
         .layer(TraceLayer::new_for_http())
