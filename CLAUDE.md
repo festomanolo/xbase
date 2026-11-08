@@ -107,7 +107,7 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 
 Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching) — **that run predates the items marked "Needs live verification" below.**
 
-### Needs live verification
+### Live verification (2026-11-08)
 
 The horizontal-scaling, REST, storage-policy, PITR and Go-parity work was written and unit-tested **without a running Postgres/Docker** (Rust 54 tests, Go `-race` suite, `bash -n`, YAML parse). Not yet exercised against a real database or Supabase stack:
 
