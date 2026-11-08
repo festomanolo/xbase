@@ -54,7 +54,7 @@ pub async fn render(State(state): State<AppState>, headers: axum::http::HeaderMa
     let m = &state.metrics;
     let app = &state.config.app_id;
     let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
-    let total = g(&m.requests_2xx) + g(&m.requests_3xx) + g(&m.requests_4xx) + g(&m.requests_5xx);
+    let total = g(&m.requests_1xx) + g(&m.requests_2xx) + g(&m.requests_3xx) + g(&m.requests_4xx) + g(&m.requests_5xx);
     let pool = &state.pool;
 
     let body = format!(
