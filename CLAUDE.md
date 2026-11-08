@@ -111,7 +111,9 @@ Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invit
 
 Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25.7`, two replicas of each backend, and (for PITR) a Linux container with `rclone` + `age`. All passed after the fixes below:
 
-1. Migrations `0004`/`0005` (SQL syntax, `rate_limit_check` under concurrency, the `storage.objects` DO block on a real `supabase_storage_admin`-owned table).
+| Area | What was exercised |
+| :--- | :--- |
+| Migrations `0001`–`0005` | Applied in order as `postgres`. `0005` installs the policies on the real `supabase_storage_admin`-owned `storage.objects`; the unprivileged-role skip path and `apply-storage-policies.sh` also work. |
 2. `rest.rs` generated SQL actually executing (type casts, `jsonb_populate_record(set)`, RLS interaction) — the unit tests check the SQL *text* and injection resistance only.
 3. Two real replicas with `REALTIME_CLUSTER=true` (NOTIFY round trip, reconnect after killing the LISTEN connection).
 4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
