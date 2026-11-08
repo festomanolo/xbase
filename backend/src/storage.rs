@@ -3,15 +3,20 @@
 //! * Bucket management uses the service role key and requires an admin caller.
 //! * Object operations forward the caller's own JWT, so Storage's RLS policies
 //!   on `storage.objects` decide access — identical to Supabase Cloud.
+//! * API keys (`x-api-key`, scopes `storage:read` / `storage:write`) are also
+//!   accepted: Storage then runs with the service role, so the key is confined
+//!   *by this proxy* to objects under `<its workspace id>/`. That is the same
+//!   layout the `storage.objects` policies (migration 0005) use for users.
 //! * Buckets are namespaced per SaaS (`<APP_ID>-<name>`) so ten apps can share
 //!   one Storage service without seeing each other's files.
 //! * Large uploads use the TUS resumable protocol (`/uploads/resumable`), and
 //!   image transformations are applied through signed render URLs.
 
 use axum::{
+    async_trait,
     body::Body,
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, Method, StatusCode},
+    extract::{FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -20,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    api_keys::{self, ApiKeyPrincipal},
     auth::{AdminClaims, UserToken},
     error::{ApiError, ApiResult},
     state::AppState,
@@ -87,6 +93,77 @@ fn storage_url(base: &str, fixed: &[&str], bucket: &str, path: Option<&str>) -> 
         }
     }
     Ok(url)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Access {
+    Read,
+    Write,
+}
+
+/// Who is calling an object endpoint: a signed-in user (Storage RLS decides) or
+/// an API key (this proxy confines it to its workspace folder).
+enum Caller {
+    User(UserToken),
+    Key(ApiKeyPrincipal),
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for Caller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        if let Some(raw) = parts.headers.get(api_keys::API_KEY_HEADER) {
+            let raw = raw
+                .to_str()
+                .map_err(|_| ApiError::Unauthorized("Malformed x-api-key header".into()))?;
+            return Ok(Caller::Key(api_keys::authenticate(state, raw).await?));
+        }
+        Ok(Caller::User(UserToken::from_request_parts(parts, state).await?))
+    }
+}
+
+impl Caller {
+    fn cred(&self) -> Cred<'_> {
+        match self {
+            Caller::User(u) => Cred::User(&u.token),
+            Caller::Key(_) => Cred::Service,
+        }
+    }
+
+    /// Validates an object path for this caller. Keys need the matching scope and
+    /// may only touch `<workspace_id>/...`.
+    fn object_path(&self, path: &str, access: Access) -> ApiResult<String> {
+        let path = validate_object_path(path)?;
+        if let Caller::Key(key) = self {
+            key.require_scope(if access == Access::Write { "storage:write" } else { "storage:read" })?;
+            key_confine(key, path)?;
+        }
+        Ok(path.to_string())
+    }
+
+    /// Listing prefix: users pass it through; a key is pinned to its workspace folder.
+    fn list_prefix(&self, prefix: &str) -> ApiResult<String> {
+        let Caller::Key(key) = self else { return Ok(prefix.to_string()) };
+        key.require_scope("storage:read")?;
+        let prefix = prefix.trim_matches('/');
+        if prefix.is_empty() {
+            return Ok(key.workspace_id.to_string());
+        }
+        let prefix = validate_object_path(prefix)?;
+        key_confine(key, prefix)?;
+        Ok(prefix.to_string())
+    }
+}
+
+/// `path` must be the key's workspace folder or something inside it.
+fn key_confine(key: &ApiKeyPrincipal, path: &str) -> ApiResult<()> {
+    let first = path.split('/').next().unwrap_or_default();
+    if first.eq_ignore_ascii_case(&key.workspace_id.to_string()) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("API keys may only access objects under '<workspace_id>/'"))
+    }
 }
 
 enum Cred<'a> {
@@ -213,17 +290,18 @@ fn default_limit() -> u32 {
 
 async fn list_objects(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<ListObjects>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
+    let prefix = caller.list_prefix(&body.prefix)?;
     let url = storage_url(&state.config.storage_url, &["object", "list"], &id, None)?;
     let payload = json!({
-        "prefix": body.prefix, "limit": body.limit.min(1000), "offset": body.offset,
+        "prefix": prefix, "limit": body.limit.min(1000), "offset": body.offset,
         "search": body.search, "sortBy": { "column": "name", "order": "asc" }
     });
-    let req = authed(&state, state.http.post(url).json(&payload), Cred::User(&user.token))?;
+    let req = authed(&state, state.http.post(url).json(&payload), caller.cred())?;
     Ok(Json(json_response(req.send().await?).await?.1))
 }
 
@@ -237,18 +315,19 @@ struct SignUpload {
 /// Returns a one-time URL the browser can PUT the file to directly (no proxying).
 async fn sign_upload(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<SignUpload>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&body.path)?;
+    let path = caller.object_path(&body.path, Access::Write)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "upload", "sign"], &id, Some(path))?;
     let mut req = state.http.post(url);
     if body.upsert {
         req = req.header("x-upsert", "true");
     }
-    let req = authed(&state, req, Cred::User(&user.token))?;
+    let req = authed(&state, req, caller.cred())?;
     let (_, resp) = json_response(req.send().await?).await?;
     let rel = resp["url"].as_str().unwrap_or_default();
     Ok(Json(json!({
@@ -287,18 +366,19 @@ fn default_expiry() -> u32 {
 /// Signed download URL, optionally with on-the-fly image transformation.
 async fn sign_download(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<SignDownload>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&body.path)?;
+    let path = caller.object_path(&body.path, Access::Read)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "sign"], &id, Some(path))?;
     let mut payload = json!({ "expiresIn": body.expires_in.clamp(1, 60 * 60 * 24 * 7) });
     if let Some(t) = &body.transform {
         payload["transform"] = serde_json::to_value(t).map_err(|e| ApiError::internal(e.to_string()))?;
     }
-    let req = authed(&state, state.http.post(url).json(&payload), Cred::User(&user.token))?;
+    let req = authed(&state, state.http.post(url).json(&payload), caller.cred())?;
     let (_, resp) = json_response(req.send().await?).await?;
     let rel = resp["signedURL"].as_str().unwrap_or_default();
     let mut signed = format!("{}/storage/v1{}", state.config.supabase_public_url, rel);
@@ -319,13 +399,14 @@ async fn sign_download(
 /// Streams an object back to the caller (for private files you don't want to sign).
 async fn download_object(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path((bucket, path)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&path)?;
+    let path = caller.object_path(&path, Access::Read)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "authenticated"], &id, Some(path))?;
-    let resp = authed(&state, state.http.get(url), Cred::User(&user.token))?
+    let resp = authed(&state, state.http.get(url), caller.cred())?
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -345,13 +426,14 @@ async fn download_object(
 async fn upload_object(
     State(state): State<AppState>,
     method: Method,
-    user: UserToken,
+    caller: Caller,
     Path((bucket, path)): Path<(String, String)>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&path)?;
+    let path = caller.object_path(&path, Access::Write)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object"], &id, Some(path))?;
     // PUT = upsert (replace), POST = create only.
     let mut req = if method == Method::PUT {
@@ -364,7 +446,7 @@ async fn upload_object(
             req = req.header(h.as_str(), v.as_bytes());
         }
     }
-    let req = authed(&state, req, Cred::User(&user.token))?
+    let req = authed(&state, req, caller.cred())?
         .body(reqwest::Body::wrap_stream(body.into_data_stream()));
     let (status, resp) = json_response(req.send().await?).await?;
     Ok((status, Json(json!({ "bucket": id, "path": path, "result": resp }))))
@@ -377,7 +459,7 @@ struct DeleteObjects {
 
 async fn delete_objects(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<DeleteObjects>,
 ) -> ApiResult<Json<Value>> {
@@ -388,13 +470,13 @@ async fn delete_objects(
     let paths = body
         .paths
         .iter()
-        .map(|p| validate_object_path(p).map(str::to_string))
+        .map(|p| caller.object_path(p, Access::Write))
         .collect::<ApiResult<Vec<_>>>()?;
     let url = storage_url(&state.config.storage_url, &["object"], &id, None)?;
     let req = authed(
         &state,
         state.http.delete(url).json(&json!({ "prefixes": paths })),
-        Cred::User(&user.token),
+        caller.cred(),
     )?;
     Ok(Json(json_response(req.send().await?).await?.1))
 }
@@ -450,6 +532,40 @@ mod tests {
         assert!(validate_object_path("u/../etc/passwd").is_err());
         assert!(validate_object_path("u//a").is_err());
         assert!(validate_object_path("").is_err());
+    }
+
+    fn key(ws: uuid::Uuid, scopes: &[&str]) -> Caller {
+        Caller::Key(ApiKeyPrincipal {
+            key_id: uuid::Uuid::nil(),
+            workspace_id: ws,
+            app_slug: "app1".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    #[test]
+    fn api_keys_are_confined_to_their_workspace_folder() {
+        let ws = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let k = key(ws, &["storage:read", "storage:write"]);
+        assert!(k.object_path(&format!("{ws}/a/b.png"), Access::Write).is_ok());
+        assert!(k.object_path(&format!("{other}/a.png"), Access::Read).is_err());
+        assert!(k.object_path("a.png", Access::Read).is_err());
+        assert!(k.object_path(&format!("{ws}/../{other}/a.png"), Access::Read).is_err(), "traversal rejected");
+        assert_eq!(k.list_prefix("").unwrap(), ws.to_string());
+        assert_eq!(k.list_prefix(&format!("/{ws}/docs/")).unwrap(), format!("{ws}/docs"));
+        assert!(k.list_prefix(&other.to_string()).is_err());
+    }
+
+    #[test]
+    fn api_key_scopes_gate_read_and_write() {
+        let ws = uuid::Uuid::new_v4();
+        let ro = key(ws, &["storage:read"]);
+        assert!(ro.object_path(&format!("{ws}/a"), Access::Read).is_ok());
+        assert!(ro.object_path(&format!("{ws}/a"), Access::Write).is_err());
+        let none = key(ws, &["embeddings:read"]);
+        assert!(none.list_prefix("").is_err());
+        assert!(key(ws, &["*"]).object_path(&format!("{ws}/a"), Access::Write).is_ok());
     }
 
     #[test]

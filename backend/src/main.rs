@@ -62,21 +62,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if config.jobs_enabled {
         tasks.extend(jobs::spawn_workers(&state, shutdown_rx.clone()));
     }
+    if config.realtime_cluster && !config.realtime_enabled {
+        tracing::warn!("REALTIME_CLUSTER=true has no effect while REALTIME_ENABLED=false");
+    }
     if config.realtime_enabled {
         match &config.direct_database_url {
             Some(url) => {
                 tokio::spawn(realtime::run_change_listener(state.realtime.clone(), url.clone()));
+                if config.realtime_cluster {
+                    realtime::spawn_cluster(&state, url.clone());
+                    tracing::info!("realtime cluster fan-out enabled");
+                }
             }
             None => tracing::warn!("DIRECT_DATABASE_URL not set; realtime database changes disabled"),
         }
     }
     {
-        let limiter = state.limiter.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                limiter.sweep();
+                state.limiter.sweep();
+                if state.config.rate_limit_backend == config::RateLimitBackend::Postgres {
+                    rate_limit::sweep_shared(&state).await;
+                }
             }
         });
     }

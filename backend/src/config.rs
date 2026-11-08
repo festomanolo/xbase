@@ -3,6 +3,16 @@ use std::env;
 
 use uuid::Uuid;
 
+/// Where token-bucket state lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateLimitBackend {
+    /// Per-process buckets: zero latency, but each replica enforces its own limit.
+    Memory,
+    /// One shared bucket per key in Postgres (`xbase.rate_limit_check`): the limit
+    /// holds across any number of replicas, at the cost of one DB round-trip.
+    Postgres,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     /// Slug of the SaaS app this binary serves. Every workspace, API key, job and
@@ -37,6 +47,7 @@ pub struct AppConfig {
     pub trust_proxy_headers: bool,
     pub rate_limit_per_second: f64,
     pub rate_limit_burst: f64,
+    pub rate_limit_backend: RateLimitBackend,
     pub metrics_token: Option<String>,
 
     pub stripe_webhook_secret: Option<String>,
@@ -48,6 +59,16 @@ pub struct AppConfig {
     pub jobs_concurrency: usize,
 
     pub realtime_enabled: bool,
+    /// Fan rooms/broadcast/presence out to other replicas of this app through
+    /// Postgres NOTIFY (needs DIRECT_DATABASE_URL). Required when running >1 replica.
+    pub realtime_cluster: bool,
+
+    /// Generic PostgREST-style CRUD at `/api/v1/rest/:table` (RLS-enforced).
+    pub rest_enabled: bool,
+    /// Schemas the REST API may expose. `xbase`, `auth`, `storage` and Postgres
+    /// internals are always refused.
+    pub rest_schemas: Vec<String>,
+    pub rest_max_rows: i64,
 
     /// OpenAI-compatible embeddings endpoint (OpenAI, Ollama, vLLM, LocalAI...).
     pub embedding_api_url: Option<String>,
@@ -88,6 +109,14 @@ pub fn parse_pairs(raw: &str) -> HashMap<String, String> {
             (!k.is_empty() && !v.is_empty()).then(|| (k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+fn parse_rate_limit_backend() -> Result<RateLimitBackend, String> {
+    match var("RATE_LIMIT_BACKEND").as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("memory") => Ok(RateLimitBackend::Memory),
+        Some("postgres" | "shared") => Ok(RateLimitBackend::Postgres),
+        Some(other) => Err(format!("Invalid RATE_LIMIT_BACKEND: expected memory|postgres, got '{other}'")),
+    }
 }
 
 fn parse_list(raw: &str) -> Vec<String> {
@@ -153,6 +182,7 @@ impl AppConfig {
             trust_proxy_headers: parse_bool("TRUST_PROXY_HEADERS", true)?,
             rate_limit_per_second: parse("RATE_LIMIT_PER_SECOND", 20.0f64)?,
             rate_limit_burst: parse("RATE_LIMIT_BURST", 60.0f64)?,
+            rate_limit_backend: parse_rate_limit_backend()?,
             metrics_token: var("METRICS_TOKEN"),
             stripe_webhook_secret: var("STRIPE_WEBHOOK_SECRET"),
             stripe_price_plans: var("STRIPE_PRICE_PLANS")
@@ -165,6 +195,13 @@ impl AppConfig {
             jobs_enabled: parse_bool("JOBS_ENABLED", true)?,
             jobs_concurrency: parse("JOBS_CONCURRENCY", 2usize)?.max(1),
             realtime_enabled: parse_bool("REALTIME_ENABLED", true)?,
+            realtime_cluster: parse_bool("REALTIME_CLUSTER", false)?,
+            rest_enabled: parse_bool("REST_ENABLED", false)?,
+            rest_schemas: var("REST_SCHEMAS")
+                .map(|r| parse_list(&r))
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| vec!["public".to_string()]),
+            rest_max_rows: parse("REST_MAX_ROWS", 1000i64)?.clamp(1, 10_000),
             embedding_api_url: var("EMBEDDING_API_URL").map(|u| u.trim_end_matches('/').to_string()),
             embedding_api_key: var("EMBEDDING_API_KEY"),
             embedding_model: var("EMBEDDING_MODEL")
@@ -197,6 +234,7 @@ impl AppConfig {
             trust_proxy_headers: true,
             rate_limit_per_second: 20.0,
             rate_limit_burst: 60.0,
+            rate_limit_backend: RateLimitBackend::Memory,
             metrics_token: None,
             stripe_webhook_secret: Some("whsec_test".to_string()),
             stripe_price_plans: parse_pairs("price_pro:pro"),
@@ -205,6 +243,10 @@ impl AppConfig {
             jobs_enabled: false,
             jobs_concurrency: 1,
             realtime_enabled: true,
+            realtime_cluster: false,
+            rest_enabled: true,
+            rest_schemas: vec!["public".to_string()],
+            rest_max_rows: 1000,
             embedding_api_url: None,
             embedding_api_key: None,
             embedding_model: "text-embedding-3-small".to_string(),

@@ -22,6 +22,7 @@ pub struct Metrics {
     pub in_flight: AtomicU64,
     pub latency_micros_sum: AtomicU64,
     pub rate_limited: AtomicU64,
+    pub rate_limit_fallbacks: AtomicU64,
     pub jobs_succeeded: AtomicU64,
     pub jobs_failed: AtomicU64,
 }
@@ -71,6 +72,12 @@ xbase_http_request_duration_seconds_count{{app=\"{app}\"}} {total}\n\
 xbase_http_in_flight{{app=\"{app}\"}} {}\n\
 # TYPE xbase_rate_limited_total counter\n\
 xbase_rate_limited_total{{app=\"{app}\"}} {}\n\
+# TYPE xbase_rate_limit_fallbacks_total counter\n\
+xbase_rate_limit_fallbacks_total{{app=\"{app}\"}} {}\n\
+# TYPE xbase_realtime_cluster_messages_total counter\n\
+xbase_realtime_cluster_messages_total{{app=\"{app}\",direction=\"published\"}} {}\n\
+xbase_realtime_cluster_messages_total{{app=\"{app}\",direction=\"received\"}} {}\n\
+xbase_realtime_cluster_messages_total{{app=\"{app}\",direction=\"dropped\"}} {}\n\
 # TYPE xbase_jobs_total counter\n\
 xbase_jobs_total{{app=\"{app}\",result=\"success\"}} {}\n\
 xbase_jobs_total{{app=\"{app}\",result=\"failure\"}} {}\n\
@@ -89,6 +96,10 @@ xbase_db_pool_connections{{app=\"{app}\",state=\"idle\"}} {}\n",
         g(&m.latency_micros_sum) as f64 / 1_000_000.0,
         g(&m.in_flight),
         g(&m.rate_limited),
+        g(&m.rate_limit_fallbacks),
+        state.realtime.cluster_published.load(Ordering::Relaxed),
+        state.realtime.cluster_received.load(Ordering::Relaxed),
+        state.realtime.cluster_dropped.load(Ordering::Relaxed),
         g(&m.jobs_succeeded),
         g(&m.jobs_failed),
         state.realtime.connections.load(Ordering::Relaxed),

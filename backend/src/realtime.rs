@@ -2,7 +2,16 @@
 //! Postgres change data capture (LISTEN/NOTIFY on `xbase_changes`).
 //!
 //! Connect: `GET /ws?access_token=<supabase jwt>` (browsers cannot set headers
-//! on WebSockets). Messages are JSON:
+//! on WebSockets).
+//!
+//! Horizontal scaling (`REALTIME_CLUSTER=true`): rooms are per-process, so every
+//! broadcast / presence change is also published on the Postgres channel
+//! `xbase_rt_<app_id>` and replayed into the rooms of every *other* replica.
+//! Presence is replicated as diffs plus a 30 s full "sync" heartbeat per room;
+//! entries of a replica that stops syncing expire after 90 s. NOTIFY payloads
+//! are capped at ~8 KB, so clustered messages are limited to ~7 KB.
+//!
+//! Messages are JSON:
 //!
 //! client → server
 //!   {"type":"join","room":"lobby"}                 public room
@@ -23,9 +32,9 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -37,7 +46,7 @@ use axum::{
     routing::get,
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::PgListener;
 use tokio::sync::{broadcast, mpsc};
@@ -63,9 +72,49 @@ struct RoomMember {
     presence: Option<Value>,
 }
 
+/// Presence entry mirrored from another replica.
+struct RemoteEntry {
+    origin: String,
+    user_id: Uuid,
+    state: Value,
+    seen: Instant,
+}
+
 #[derive(Default)]
 struct Room {
     members: HashMap<ConnId, RoomMember>,
+    /// Presence held by connections on other replicas, keyed by conn id.
+    remote: HashMap<String, RemoteEntry>,
+}
+
+/// Largest cluster payload we publish (Postgres NOTIFY allows < 8000 bytes).
+pub const MAX_CLUSTER_BYTES: usize = 7000;
+const MAX_ENVELOPE_BYTES: usize = 7900;
+const PRESENCE_SYNC_EVERY: Duration = Duration::from_secs(30);
+const REMOTE_PRESENCE_TTL: Duration = Duration::from_secs(90);
+
+struct ClusterLink {
+    tx: mpsc::Sender<String>,
+    app: String,
+}
+
+/// Wire format on the cluster channel. `o` = origin replica id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Envelope {
+    /// A message (broadcast or presence_diff) to replay into local room members.
+    Msg { o: String, app: String, room: String, msg: Value },
+    /// Full presence of the origin replica for one room.
+    Sync { o: String, app: String, room: String, presence: serde_json::Map<String, Value> },
+    /// "I just got my first member in this room; please Sync it to me."
+    Req { o: String, app: String, room: String },
+}
+
+/// Postgres channel for a SaaS app's cluster traffic (identifier-safe, <= 63 bytes).
+pub fn room_channel(app_id: &str) -> String {
+    let mut c = format!("xbase_rt_{}", app_id.replace('-', "_"));
+    c.truncate(63);
+    c
 }
 
 /// Change event decoded from `pg_notify('xbase_changes', ...)`.
@@ -85,6 +134,11 @@ pub struct RealtimeHub {
     changes: broadcast::Sender<Arc<ChangeEvent>>,
     next_id: AtomicU64,
     pub connections: AtomicU64,
+    origin: String,
+    cluster: OnceLock<ClusterLink>,
+    pub cluster_published: AtomicU64,
+    pub cluster_received: AtomicU64,
+    pub cluster_dropped: AtomicU64,
 }
 
 impl Default for RealtimeHub {
@@ -101,6 +155,135 @@ impl RealtimeHub {
             changes,
             next_id: AtomicU64::new(1),
             connections: AtomicU64::new(0),
+            origin: Uuid::new_v4().to_string(),
+            cluster: OnceLock::new(),
+            cluster_published: AtomicU64::new(0),
+            cluster_received: AtomicU64::new(0),
+            cluster_dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// Turns on cross-replica fan-out. Connection ids switch to a random 32-bit
+    /// prefix (kept below 2^53 so JavaScript clients read them exactly) so ids
+    /// — which double as presence keys — never collide between replicas.
+    pub fn enable_cluster(&self, app_id: &str, tx: mpsc::Sender<String>) {
+        if self.cluster.set(ClusterLink { tx, app: app_id.to_string() }).is_ok() {
+            self.next_id.store(((rand::random::<u32>() as u64) << 20) | 1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn cluster_enabled(&self) -> bool {
+        self.cluster.get().is_some()
+    }
+
+    fn publish(&self, env: &Envelope) {
+        let Some(link) = self.cluster.get() else { return };
+        let sent = serde_json::to_string(env)
+            .ok()
+            .filter(|s| s.len() <= MAX_ENVELOPE_BYTES)
+            .is_some_and(|s| link.tx.try_send(s).is_ok());
+        let counter = if sent { &self.cluster_published } else { &self.cluster_dropped };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn for_us(&self, origin: &str, app: &str) -> bool {
+        origin != self.origin && self.cluster.get().is_some_and(|l| l.app == app)
+    }
+
+    /// Applies an envelope published by another replica.
+    pub fn apply_remote(&self, env: Envelope) {
+        match env {
+            Envelope::Msg { o, app, room, msg } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let mut rooms = self.rooms.lock().unwrap();
+                let Some(r) = rooms.get_mut(&room) else { return };
+                if msg["type"] == "presence_diff" {
+                    apply_remote_diff(r, &o, &msg);
+                }
+                fan_out(r, None, &msg);
+            }
+            Envelope::Sync { o, app, room, presence } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let mut rooms = self.rooms.lock().unwrap();
+                let Some(r) = rooms.get_mut(&room) else { return };
+                apply_remote_sync(r, &room, &o, presence);
+            }
+            Envelope::Req { o, app, room } => {
+                if !self.for_us(&o, &app) {
+                    return;
+                }
+                self.cluster_received.fetch_add(1, Ordering::Relaxed);
+                let rooms = self.rooms.lock().unwrap();
+                if let Some(r) = rooms.get(&room) {
+                    self.publish_sync(&room, r);
+                }
+            }
+        }
+    }
+
+    fn publish_sync(&self, room: &str, r: &Room) {
+        let presence = local_presence(r);
+        if presence.is_empty() {
+            return;
+        }
+        if let Some(link) = self.cluster.get() {
+            self.publish(&Envelope::Sync {
+                o: self.origin.clone(),
+                app: link.app.clone(),
+                room: room.to_string(),
+                presence,
+            });
+        }
+    }
+
+    /// Asks other replicas for presence of every room we hold (after (re)connecting).
+    pub fn request_all_presence(&self) {
+        let Some(link) = self.cluster.get() else { return };
+        let rooms = self.rooms.lock().unwrap();
+        for room in rooms.keys() {
+            self.publish(&Envelope::Req { o: self.origin.clone(), app: link.app.clone(), room: room.clone() });
+        }
+    }
+
+    /// Periodic housekeeping: re-announce our presence and expire entries from
+    /// replicas that went silent.
+    pub fn cluster_tick(&self) {
+        {
+            let rooms = self.rooms.lock().unwrap();
+            for (name, r) in rooms.iter() {
+                self.publish_sync(name, r);
+            }
+        }
+        self.expire_remote(REMOTE_PRESENCE_TTL);
+    }
+
+    fn expire_remote(&self, ttl: Duration) {
+        let mut rooms = self.rooms.lock().unwrap();
+        for (name, r) in rooms.iter_mut() {
+            let dead: Vec<String> = r
+                .remote
+                .iter()
+                .filter(|(_, e)| e.seen.elapsed() > ttl)
+                .map(|(k, _)| k.clone())
+                .collect();
+            if dead.is_empty() {
+                continue;
+            }
+            let leaves: serde_json::Map<String, Value> = dead
+                .into_iter()
+                .filter_map(|k| {
+                    r.remote
+                        .remove(&k)
+                        .map(|e| (k, json!({ "user_id": e.user_id, "state": e.state })))
+                })
+                .collect();
+            fan_out(r, None, &json!({ "type": "presence_diff", "room": name, "joins": {}, "leaves": leaves }));
         }
     }
 
@@ -111,8 +294,15 @@ impl RealtimeHub {
     fn join(&self, room: &str, conn: ConnId, user_id: Uuid, tx: mpsc::Sender<Arc<str>>) -> Value {
         let mut rooms = self.rooms.lock().unwrap();
         let r = rooms.entry(room.to_string()).or_default();
+        let first_local = r.members.is_empty();
         r.members.insert(conn, RoomMember { tx, user_id, presence: None });
-        presence_snapshot(r)
+        let snapshot = presence_snapshot(r);
+        if first_local {
+            if let Some(link) = self.cluster.get() {
+                self.publish(&Envelope::Req { o: self.origin.clone(), app: link.app.clone(), room: room.to_string() });
+            }
+        }
+        snapshot
     }
 
     fn leave(&self, room: &str, conn: ConnId) {
@@ -128,6 +318,7 @@ impl RealtimeHub {
                 "leaves": { conn.to_string(): { "user_id": user_id, "state": state } }
             });
             fan_out(r, None, &diff);
+            self.publish_msg(room, diff);
         }
         if r.members.is_empty() {
             rooms.remove(room);
@@ -139,6 +330,7 @@ impl RealtimeHub {
         match rooms.get(room) {
             Some(r) if r.members.contains_key(&from) => {
                 fan_out(r, Some(from), msg);
+                self.publish_msg(room, msg.clone());
                 true
             }
             _ => false,
@@ -160,7 +352,14 @@ impl RealtimeHub {
             .unwrap_or_else(|| json!({}));
         let diff = json!({ "type": "presence_diff", "room": room, "joins": joins, "leaves": leaves });
         fan_out(r, None, &diff);
+        self.publish_msg(room, diff);
         true
+    }
+
+    fn publish_msg(&self, room: &str, msg: Value) {
+        if let Some(link) = self.cluster.get() {
+            self.publish(&Envelope::Msg { o: self.origin.clone(), app: link.app.clone(), room: room.to_string(), msg });
+        }
     }
 
     pub fn room_count(&self) -> usize {
@@ -168,17 +367,82 @@ impl RealtimeHub {
     }
 }
 
-fn presence_snapshot(room: &Room) -> Value {
-    let presences: serde_json::Map<String, Value> = room
-        .members
+/// Presence held by this replica's own connections.
+fn local_presence(room: &Room) -> serde_json::Map<String, Value> {
+    room.members
         .iter()
         .filter_map(|(id, m)| {
             m.presence
                 .as_ref()
                 .map(|p| (id.to_string(), json!({ "user_id": m.user_id, "state": p })))
         })
-        .collect();
+        .collect()
+}
+
+/// Local plus replicated presence.
+fn presence_snapshot(room: &Room) -> Value {
+    let mut presences = local_presence(room);
+    for (id, e) in &room.remote {
+        presences.insert(id.clone(), json!({ "user_id": e.user_id, "state": e.state }));
+    }
     Value::Object(presences)
+}
+
+fn parse_presence_entry(v: &Value) -> Option<(Uuid, Value)> {
+    let user_id = v["user_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())?;
+    Some((user_id, v["state"].clone()))
+}
+
+/// Mirrors a remote `presence_diff` into the room's replicated presence.
+fn apply_remote_diff(room: &mut Room, origin: &str, msg: &Value) {
+    if let Some(leaves) = msg["leaves"].as_object() {
+        for key in leaves.keys() {
+            room.remote.remove(key);
+        }
+    }
+    if let Some(joins) = msg["joins"].as_object() {
+        for (key, v) in joins {
+            if let Some((user_id, state)) = parse_presence_entry(v) {
+                room.remote.insert(
+                    key.clone(),
+                    RemoteEntry { origin: origin.to_string(), user_id, state, seen: Instant::now() },
+                );
+            }
+        }
+    }
+}
+
+/// Replaces everything `origin` holds in the room with its full `presence` and
+/// tells local members what changed.
+fn apply_remote_sync(room: &mut Room, name: &str, origin: &str, presence: serde_json::Map<String, Value>) {
+    let mut joins = serde_json::Map::new();
+    let mut leaves = serde_json::Map::new();
+
+    let gone: Vec<String> = room
+        .remote
+        .iter()
+        .filter(|(k, e)| e.origin == origin && !presence.contains_key(*k))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in gone {
+        if let Some(e) = room.remote.remove(&key) {
+            leaves.insert(key, json!({ "user_id": e.user_id, "state": e.state }));
+        }
+    }
+    for (key, v) in presence {
+        let Some((user_id, state)) = parse_presence_entry(&v) else { continue };
+        let changed = room.remote.get(&key).is_none_or(|e| e.state != state);
+        room.remote.insert(
+            key.clone(),
+            RemoteEntry { origin: origin.to_string(), user_id, state, seen: Instant::now() },
+        );
+        if changed {
+            joins.insert(key, v);
+        }
+    }
+    if !joins.is_empty() || !leaves.is_empty() {
+        fan_out(room, None, &json!({ "type": "presence_diff", "room": name, "joins": joins, "leaves": leaves }));
+    }
 }
 
 /// Non-blocking fan-out; slow consumers drop messages instead of stalling the room.
@@ -381,9 +645,15 @@ async fn handle_client_msg(
                 "type": "broadcast", "room": room, "event": event,
                 "payload": payload, "from": conn.claims.sub
             });
+            if hub.cluster_enabled() && msg.to_string().len() > MAX_CLUSTER_BYTES {
+                return err("message too large for clustered realtime (max 7000 bytes)");
+            }
             if hub.broadcast(&room, conn.id, &msg) { None } else { err("join the room first") }
         }
         ClientMsg::Track { room, state } => {
+            if hub.cluster_enabled() && state.to_string().len() > MAX_CLUSTER_BYTES / 2 {
+                return err("presence state too large for clustered realtime (max 3500 bytes)");
+            }
             if hub.track(&room, conn.id, Some(state)) { None } else { err("join the room first") }
         }
         ClientMsg::Untrack { room } => {
@@ -446,9 +716,181 @@ pub async fn run_change_listener(hub: Arc<RealtimeHub>, direct_url: String) {
     }
 }
 
+/// Drains hub → Postgres: every locally originated envelope becomes a
+/// `pg_notify`. Goes through the request pool (NOTIFY is fine in transaction mode).
+pub async fn run_cluster_publisher(pool: sqlx::PgPool, channel: String, mut rx: mpsc::Receiver<String>) {
+    while let Some(payload) = rx.recv().await {
+        if let Err(e) = sqlx::query("select pg_notify($1, $2)")
+            .bind(&channel)
+            .bind(&payload)
+            .execute(&pool)
+            .await
+        {
+            tracing::warn!(error = %e, "cluster publish failed");
+        }
+    }
+}
+
+/// Receives other replicas' envelopes on a dedicated session connection, with
+/// reconnect + backoff (a dropped LISTEN connection would otherwise silently
+/// stop all cross-replica delivery).
+pub async fn run_cluster_listener(hub: Arc<RealtimeHub>, direct_url: String, channel: String) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match PgListener::connect(&direct_url).await {
+            Ok(mut listener) => {
+                if let Err(e) = listener.listen(&channel).await {
+                    tracing::warn!(error = %e, "cluster LISTEN failed");
+                } else {
+                    tracing::info!(%channel, "realtime cluster listener connected");
+                    backoff = Duration::from_secs(1);
+                    hub.request_all_presence();
+                    loop {
+                        match listener.recv().await {
+                            Ok(n) => match serde_json::from_str::<Envelope>(n.payload()) {
+                                Ok(env) => hub.apply_remote(env),
+                                Err(e) => tracing::debug!(error = %e, "ignoring malformed cluster payload"),
+                            },
+                            Err(e) => {
+                                tracing::warn!(error = %e, "cluster listener disconnected");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "cluster listener connect failed"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// Spawns publisher, listener and the presence heartbeat for a clustered hub.
+pub fn spawn_cluster(state: &AppState, direct_url: String) {
+    let hub = state.realtime.clone();
+    let channel = room_channel(&state.config.app_id);
+    let (tx, rx) = mpsc::channel::<String>(1024);
+    hub.enable_cluster(&state.config.app_id, tx);
+    tokio::spawn(run_cluster_publisher(state.pool.clone(), channel.clone(), rx));
+    tokio::spawn(run_cluster_listener(hub.clone(), direct_url, channel));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(PRESENCE_SYNC_EVERY);
+        loop {
+            tick.tick().await;
+            hub.cluster_tick();
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two hubs wired back-to-back, as two replicas sharing one NOTIFY channel.
+    fn pair() -> (Arc<RealtimeHub>, Arc<RealtimeHub>, mpsc::Receiver<String>, mpsc::Receiver<String>) {
+        let (a, b) = (Arc::new(RealtimeHub::new()), Arc::new(RealtimeHub::new()));
+        let (atx, arx) = mpsc::channel(64);
+        let (btx, brx) = mpsc::channel(64);
+        a.enable_cluster("app", atx);
+        b.enable_cluster("app", btx);
+        (a, b, arx, brx)
+    }
+
+    /// Delivers everything `from` published to `to`, like the Postgres round trip.
+    fn pump(rx: &mut mpsc::Receiver<String>, to: &RealtimeHub) {
+        while let Ok(raw) = rx.try_recv() {
+            to.apply_remote(serde_json::from_str(&raw).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_and_presence_cross_replicas() {
+        let (a, b, mut a_out, mut b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        let (ua, ub) = (Uuid::new_v4(), Uuid::new_v4());
+
+        a.join("lobby", 1, ua, a_tx);
+        b.join("lobby", 2, ub, b_tx);
+        pump(&mut a_out, &b);
+        pump(&mut b_out, &a);
+
+        // broadcast on A reaches the member on B
+        assert!(a.broadcast("lobby", 1, &json!({"type":"broadcast","payload":42})));
+        pump(&mut a_out, &b);
+        let got: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(got["payload"], 42);
+
+        // presence on A is visible to B members and in B's snapshot for late joiners
+        assert!(a.track("lobby", 1, Some(json!({"status":"online"}))));
+        pump(&mut a_out, &b);
+        let diff: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(diff["type"], "presence_diff");
+        assert_eq!(diff["joins"]["1"]["state"]["status"], "online");
+
+        let (c_tx, _c_rx) = mpsc::channel(16);
+        let snap = b.join("lobby", 3, Uuid::new_v4(), c_tx);
+        assert_eq!(snap["1"]["user_id"], json!(ua));
+
+        // leaving on A emits a leave diff on B
+        a.leave("lobby", 1);
+        pump(&mut a_out, &b);
+        let leave: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(leave["leaves"]["1"]["state"]["status"], "online");
+    }
+
+    #[tokio::test]
+    async fn new_replica_member_gets_existing_presence_via_sync() {
+        let (a, b, mut a_out, mut b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        a.join("lobby", 1, Uuid::new_v4(), a_tx);
+        a.track("lobby", 1, Some(json!({"n":1})));
+        pump(&mut a_out, &b); // B has no members yet: ignored
+
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        let snap = b.join("lobby", 2, Uuid::new_v4(), b_tx);
+        assert_eq!(snap, json!({}), "nothing replicated yet");
+
+        pump(&mut b_out, &a); // A sees the Req and answers with a Sync
+        pump(&mut a_out, &b);
+        let diff: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(diff["joins"]["1"]["state"]["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn silent_replica_presence_expires() {
+        let (a, b, mut a_out, _b_out) = pair();
+        let (a_tx, _a_rx) = mpsc::channel(16);
+        let (b_tx, mut b_rx) = mpsc::channel(16);
+        a.join("lobby", 1, Uuid::new_v4(), a_tx);
+        b.join("lobby", 2, Uuid::new_v4(), b_tx);
+        a.track("lobby", 1, Some(json!({"x":1})));
+        pump(&mut a_out, &b);
+        let _join: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+
+        b.expire_remote(Duration::ZERO);
+        let leave: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(leave["leaves"]["1"]["state"]["x"], 1);
+    }
+
+    #[test]
+    fn ignores_own_and_foreign_app_envelopes() {
+        let (a, _b, _ao, _bo) = pair();
+        let (tx, mut rx) = mpsc::channel(4);
+        a.join("lobby", 1, Uuid::new_v4(), tx);
+        let own = Envelope::Msg { o: a.origin.clone(), app: "app".into(), room: "lobby".into(), msg: json!({"type":"broadcast"}) };
+        let foreign = Envelope::Msg { o: "other".into(), app: "different-app".into(), room: "lobby".into(), msg: json!({"type":"broadcast"}) };
+        a.apply_remote(own);
+        a.apply_remote(foreign);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn channel_names_are_identifier_safe() {
+        assert_eq!(room_channel("saas-app-1"), "xbase_rt_saas_app_1");
+        assert!(room_channel(&"x".repeat(200)).len() <= 63);
+    }
 
     #[tokio::test]
     async fn rooms_broadcast_and_presence() {
