@@ -63,14 +63,7 @@ xbase/
 
 ## Part 1: Deploy on a VPS
 
-### Prerequisites
-
-* A Linux VPS (Ubuntu 22.04/24.04 or Debian recommended) with at least **4GB of RAM** and **2 vCPUs**.
-* Root or `sudo` access to your server.
-
-### 1. Install Docker and Git
-
-Update your package manager and install the necessary dependencies, including Docker, which runs the Supabase services.
+**Prerequisites:** Ubuntu 22.04/24.04 or Debian, **4 GB RAM / 2 vCPU** minimum, a domain pointing at the server.
 
 ```bash
 sudo apt update && sudo apt upgrade -y
