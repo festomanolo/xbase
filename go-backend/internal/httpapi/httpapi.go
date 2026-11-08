@@ -170,6 +170,33 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 	})
 }
 
+// allow consumes a rate-limit token from the configured backend. With the
+// shared (postgres) backend any DB failure or >250ms stall falls back to the
+// local bucket, so a database blip never turns into an API outage.
+func (s *Server) allow(ctx context.Context, key string) (bool, int, time.Duration) {
+	if s.cfg.RateLimitBackend == "postgres" {
+		cctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		ok, remaining, retry, err := s.limiter.AllowShared(cctx, s.pool, s.cfg.AppID, key)
+		cancel()
+		if err == nil {
+			return ok, remaining, retry
+		}
+		s.metrics.rateLimitFallbacks.Add(1)
+		slog.Warn("shared rate limiter failed; using local bucket", "error", err)
+	}
+	return s.limiter.Allow(key)
+}
+
+// SweepRateLimits drops idle buckets (memory and, when enabled, shared).
+func (s *Server) SweepRateLimits(ctx context.Context) {
+	s.limiter.Sweep()
+	if s.cfg.RateLimitBackend == "postgres" {
+		if err := s.limiter.SweepShared(ctx, s.pool, s.cfg.AppID); err != nil {
+			slog.Debug("shared rate-limit sweep failed", "error", err)
+		}
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -179,6 +206,20 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap lets http.ResponseController (and therefore WebSocket upgrades and
+// per-request deadlines) reach the real ResponseWriter through the middleware.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(s.ResponseWriter).Hijack()
+	if err == nil {
+		s.status = http.StatusSwitchingProtocols
+	}
+	return conn, rw, err
+}
+
+func (s *statusRecorder) Flush() { _ = http.NewResponseController(s.ResponseWriter).Flush() }
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -333,24 +374,14 @@ func (s *Server) getWorkspace(w http.ResponseWriter, r *http.Request) {
 // whoami authenticates an x-api-key created by the Rust backend.
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.Header.Get(auth.APIKeyHeader))
-	if auth.APIKeyPrefix(raw) == "" {
+	if raw == "" {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Missing or malformed x-api-key")
 		return
 	}
-	var keyID, workspaceID string
-	var scopes []string
-	err := s.pool.QueryRow(r.Context(), `
-		select id::text, workspace_id::text, scopes from xbase.api_keys
-		 where key_hash = $1 and app_slug = $2 and revoked_at is null
-		   and (expires_at is null or expires_at > now())`,
-		auth.HashAPIKey(raw), s.cfg.AppID).Scan(&keyID, &workspaceID, &scopes)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid, expired or revoked API key")
+	k, apiErr := s.authenticateKey(r.Context(), raw)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
-	if err != nil {
-		dbError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"key_id": keyID, "workspace_id": workspaceID, "scopes": scopes})
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": k.KeyID, "workspace_id": k.WorkspaceID, "scopes": k.Scopes})
 }
