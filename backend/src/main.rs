@@ -25,6 +25,26 @@ use crate::{config::AppConfig, db::create_pool, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Operator subcommands, handled before any configuration is loaded (so they never
+    // need DATABASE_URL). The slim runtime image has no curl, so the binary probes itself:
+    //   xbase-backend healthcheck        exit 0 iff GET /health is 200 (Docker HEALTHCHECK)
+    //   xbase-backend probe [/path]      print the response body (default /metrics), exit 0 iff 200
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("healthcheck") => std::process::exit(if local_get("/health").await.is_some_and(|(c, _)| c == 200) { 0 } else { 1 }),
+        Some("probe") => {
+            let path = args.next().unwrap_or_else(|| "/metrics".to_string());
+            match local_get(&path).await {
+                Some((code, body)) => {
+                    print!("{body}");
+                    std::process::exit(if code == 200 { 0 } else { 1 });
+                }
+                None => std::process::exit(2),
+            }
+        }
+        _ => {}
+    }
+
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::registry()
