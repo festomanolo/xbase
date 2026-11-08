@@ -366,18 +366,19 @@ fn default_expiry() -> u32 {
 /// Signed download URL, optionally with on-the-fly image transformation.
 async fn sign_download(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<SignDownload>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&body.path)?;
+    let path = caller.object_path(&body.path, Access::Read)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "sign"], &id, Some(path))?;
     let mut payload = json!({ "expiresIn": body.expires_in.clamp(1, 60 * 60 * 24 * 7) });
     if let Some(t) = &body.transform {
         payload["transform"] = serde_json::to_value(t).map_err(|e| ApiError::internal(e.to_string()))?;
     }
-    let req = authed(&state, state.http.post(url).json(&payload), Cred::User(&user.token))?;
+    let req = authed(&state, state.http.post(url).json(&payload), caller.cred())?;
     let (_, resp) = json_response(req.send().await?).await?;
     let rel = resp["signedURL"].as_str().unwrap_or_default();
     let mut signed = format!("{}/storage/v1{}", state.config.supabase_public_url, rel);
