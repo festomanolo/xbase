@@ -53,29 +53,24 @@ xbase/
 ## Key Commands
 
 ```bash
-# Bootstrap official self-hosted Supabase Docker stack & generate secrets
-./scripts/bootstrap-supabase.sh
-
-# Run Rust backend unit tests
-cd backend && cargo test
-
-# Run Rust backend locally
-cd backend && cp .env.example .env && cargo run
-
-# Build production release binary
-cd backend && cargo build --release
+./scripts/bootstrap-supabase.sh                       # Supabase docker + secrets
+cd backend && cargo test                              # Rust unit + HTTP tests (no DB needed)
+cd backend && cp .env.example .env && cargo run       # needs DATABASE_URL + DIRECT_DATABASE_URL
+cd go-backend && go test ./...                        # Go tests
+docker build -f backend/Dockerfile .                  # Rust image: build context MUST be repo root
+cd docker && docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
 ```
 
 ---
 
 ## Architectural Invariants
 
-1. **Always Connect via Supavisor (`6543`) in Transaction Mode**:
-   When running 10+ SaaS backends against a single PostgreSQL instance, backends must connect through Supavisor (`port 6543`) and disable SQLx's prepared statement cache (`statement_cache_capacity(0)` in `backend/src/db.rs`) so multiplexed connections never collide on prepared statements.
-2. **Zero-Network JWT Validation**:
-   `backend/src/auth.rs` validates Supabase GoTrue HS256 JWTs locally using `SUPABASE_JWT_SECRET` rather than making an HTTP call to GoTrue on every request.
-3. **Logical Multi-SaaS Isolation**:
-   All 10+ SaaS applications share one Postgres cluster isolated by `app_slug` (in schema `xbase`) or per-SaaS schemas, enforced by Row-Level Security (RLS) and explicit `app_slug` + `owner_id` predicates.
+1. **Supavisor (`6543`) transaction mode for request traffic**, `statement_cache_capacity(0)` in `db.rs` (Go: `QueryExecModeExec`). Anything needing a session — migrations (advisory lock) and `LISTEN` — uses `DIRECT_DATABASE_URL` (`5432`).
+2. **Zero-network JWT validation** with `SUPABASE_JWT_SECRET`. `sub` is optional in `SupabaseClaims` because Supabase `anon`/`service_role` keys have none; the extractor rejects sub-less tokens unless role is `service_role`.
+3. **Postgres is the authorization layer.** User-facing queries go through `rls::begin_rls`, never the bare pool. Policies live in migrations; billing/secret columns are protected by column-level grants. Internal tables (`jobs`, `webhook_events`) have RLS on and no policies.
+4. **Everything is scoped by `APP_ID`**: workspaces (`app_slug`), API keys, jobs, webhook events, embeddings, storage buckets (`<APP_ID>-<name>`). Never query those tables without the app predicate.
+5. **API-key principals** bypass RLS (service connection), so handlers must call `Principal::require_workspace_scope` and keep explicit `workspace_id`/`app_slug` predicates.
+6. **Migrations are append-only** (sqlx checksums). Add `000N_*.sql`; never edit applied files. `set_ignore_missing(true)` lets older binaries boot against newer schemas.
 
 ---
 
