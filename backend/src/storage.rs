@@ -426,13 +426,14 @@ async fn download_object(
 async fn upload_object(
     State(state): State<AppState>,
     method: Method,
-    user: UserToken,
+    caller: Caller,
     Path((bucket, path)): Path<(String, String)>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&path)?;
+    let path = caller.object_path(&path, Access::Write)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object"], &id, Some(path))?;
     // PUT = upsert (replace), POST = create only.
     let mut req = if method == Method::PUT {
@@ -445,7 +446,7 @@ async fn upload_object(
             req = req.header(h.as_str(), v.as_bytes());
         }
     }
-    let req = authed(&state, req, Cred::User(&user.token))?
+    let req = authed(&state, req, caller.cred())?
         .body(reqwest::Body::wrap_stream(body.into_data_stream()));
     let (status, resp) = json_response(req.send().await?).await?;
     Ok((status, Json(json!({ "bucket": id, "path": path, "result": resp }))))
