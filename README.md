@@ -145,8 +145,8 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 | **API keys** | `GET/POST /api/v1/workspaces/:id/api-keys`, `DELETE …/api-keys/:key_id` | JWT (owner/admin) |
 | | `GET /api/v1/server/whoami` | `x-api-key` |
 | **Storage** | `GET/POST /api/v1/storage/buckets`, `DELETE …/buckets/:bucket?force=true` | admin |
-| | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT |
-| | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT |
+| | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT or API key |
+| | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT or API key |
 | | `POST /api/v1/storage/uploads/resumable` (TUS / multipart details) | JWT |
 | **Realtime** | `GET /ws?access_token=<jwt>` | JWT |
 | **Vector** | `POST /api/v1/workspaces/:id/embeddings` · `…/embeddings/search` · `…/embeddings/reindex`, `DELETE …/embeddings/:id` | JWT or API key |
