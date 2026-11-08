@@ -29,8 +29,9 @@ type Config struct {
 	MetricsToken       string
 	AdminUserIDs       []string
 
-	// Supabase services (storage proxy)
+	// Supabase services (storage + auth proxy)
 	SupabaseURL        string
+	GoTrueURL          string
 	SupabasePublicURL  string
 	StorageURL         string
 	SupabaseAnonKey    string
@@ -46,6 +47,14 @@ type Config struct {
 	StripePricePlans          map[string]string
 	LemonSqueezyWebhookSecret string
 	LemonSqueezyVariantPlans  map[string]string
+
+	// Background jobs (xbase.jobs)
+	JobsEnabled     bool
+	JobsConcurrency int
+
+	// Generic REST API (/api/v1/rest/{table})
+	RESTEnabled bool
+	RESTSchemas []string
 
 	// Vector / embeddings
 	EmbeddingAPIURL string
@@ -105,6 +114,7 @@ func Load() (*Config, error) {
 	c.SupabaseURL = strings.TrimRight(env("SUPABASE_URL", "http://localhost:8000"), "/")
 	c.SupabasePublicURL = strings.TrimRight(env("SUPABASE_PUBLIC_URL", c.SupabaseURL), "/")
 	c.StorageURL = strings.TrimRight(env("STORAGE_URL", c.SupabaseURL+"/storage/v1"), "/")
+	c.GoTrueURL = strings.TrimRight(env("GOTRUE_URL", c.SupabaseURL+"/auth/v1"), "/")
 	c.SupabaseAnonKey = env("SUPABASE_ANON_KEY", "")
 	c.SupabaseServiceKey = env("SUPABASE_SERVICE_ROLE_KEY", "")
 
@@ -136,6 +146,17 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid RATE_LIMIT_BURST: %w", err)
 	}
 	c.CORSAllowedOrigins = splitList(env("CORS_ALLOWED_ORIGINS", ""))
+	if c.JobsEnabled, err = strconv.ParseBool(env("JOBS_ENABLED", "true")); err != nil {
+		return nil, fmt.Errorf("invalid JOBS_ENABLED: %w", err)
+	}
+	if c.JobsConcurrency, err = strconv.Atoi(env("JOBS_CONCURRENCY", "2")); err != nil {
+		return nil, fmt.Errorf("invalid JOBS_CONCURRENCY: %w", err)
+	}
+	c.JobsConcurrency = max(c.JobsConcurrency, 1)
+	if c.RESTEnabled, err = strconv.ParseBool(env("REST_ENABLED", "false")); err != nil {
+		return nil, fmt.Errorf("invalid REST_ENABLED: %w", err)
+	}
+	c.RESTSchemas = splitList(env("REST_SCHEMAS", "public"))
 	return c, nil
 }
 
