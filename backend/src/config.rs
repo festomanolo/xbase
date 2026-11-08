@@ -59,6 +59,16 @@ pub struct AppConfig {
     pub jobs_concurrency: usize,
 
     pub realtime_enabled: bool,
+    /// Fan rooms/broadcast/presence out to other replicas of this app through
+    /// Postgres NOTIFY (needs DIRECT_DATABASE_URL). Required when running >1 replica.
+    pub realtime_cluster: bool,
+
+    /// Generic PostgREST-style CRUD at `/api/v1/rest/:table` (RLS-enforced).
+    pub rest_enabled: bool,
+    /// Schemas the REST API may expose. `xbase`, `auth`, `storage` and Postgres
+    /// internals are always refused.
+    pub rest_schemas: Vec<String>,
+    pub rest_max_rows: i64,
 
     /// OpenAI-compatible embeddings endpoint (OpenAI, Ollama, vLLM, LocalAI...).
     pub embedding_api_url: Option<String>,
@@ -99,6 +109,14 @@ pub fn parse_pairs(raw: &str) -> HashMap<String, String> {
             (!k.is_empty() && !v.is_empty()).then(|| (k.to_string(), v.to_string()))
         })
         .collect()
+}
+
+fn parse_rate_limit_backend() -> Result<RateLimitBackend, String> {
+    match var("RATE_LIMIT_BACKEND").as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("memory") => Ok(RateLimitBackend::Memory),
+        Some("postgres" | "shared") => Ok(RateLimitBackend::Postgres),
+        Some(other) => Err(format!("Invalid RATE_LIMIT_BACKEND: expected memory|postgres, got '{other}'")),
+    }
 }
 
 fn parse_list(raw: &str) -> Vec<String> {
@@ -164,6 +182,7 @@ impl AppConfig {
             trust_proxy_headers: parse_bool("TRUST_PROXY_HEADERS", true)?,
             rate_limit_per_second: parse("RATE_LIMIT_PER_SECOND", 20.0f64)?,
             rate_limit_burst: parse("RATE_LIMIT_BURST", 60.0f64)?,
+            rate_limit_backend: parse_rate_limit_backend()?,
             metrics_token: var("METRICS_TOKEN"),
             stripe_webhook_secret: var("STRIPE_WEBHOOK_SECRET"),
             stripe_price_plans: var("STRIPE_PRICE_PLANS")
