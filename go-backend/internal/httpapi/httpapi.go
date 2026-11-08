@@ -111,17 +111,12 @@ func claimsFrom(r *http.Request) *auth.Claims {
 
 func (s *Server) requireUser(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := auth.BearerToken(r)
-		if token == "" {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "Missing Authorization: Bearer <token>")
+		p, apiErr := s.resolveUser(r)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
 			return
 		}
-		claims, err := auth.Verify(token, s.cfg.JWTSecret)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "unauthorized", err.Error())
-			return
-		}
-		next(w, r.WithContext(context.WithValue(r.Context(), claimsKey, claims)))
+		next(w, r.WithContext(context.WithValue(r.Context(), claimsKey, p.claims)))
 	})
 }
 
@@ -157,14 +152,15 @@ func (s *Server) rateKey(r *http.Request) string {
 
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/health") {
+		if strings.HasPrefix(r.URL.Path, "/health") || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/webhooks/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		ok, remaining, retry := s.limiter.Allow(s.rateKey(r))
+		ok, remaining, retry := s.allow(r.Context(), s.rateKey(r))
 		w.Header().Set("X-Ratelimit-Limit", strconv.Itoa(s.limiter.Burst()))
 		w.Header().Set("X-Ratelimit-Remaining", strconv.Itoa(remaining))
 		if !ok {
+			s.metrics.rateLimited.Add(1)
 			secs := max(int(retry.Seconds()), 1)
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
