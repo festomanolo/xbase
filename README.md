@@ -25,7 +25,9 @@ xbase/
 ├── migrations/                        # Embedded into the Rust binary, applied on boot
 │   ├── 0001_init_multi_saas.sql       # xbase.apps, xbase.workspaces
 │   ├── 0002_platform_core.sql         # members, invitations, API keys, jobs, webhooks, CDC triggers, RLS
-│   └── 0003_vector_embeddings.sql     # pgvector embeddings + HNSW index
+│   ├── 0003_vector_embeddings.sql     # pgvector embeddings + HNSW index
+│   ├── 0004_shared_rate_limit.sql     # shared token bucket for multi-replica rate limiting
+│   └── 0005_storage_policies.sql      # workspace-scoped storage.objects policies
 ├── backend/                           # Rust platform API (Axum 0.7, SQLx 0.8, Tokio)
 │   └── src/
 │       ├── main.rs        # boot: migrations, pool, workers, CDC listener, graceful shutdown
