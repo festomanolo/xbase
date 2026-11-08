@@ -28,7 +28,14 @@ use crate::{
 pub const API_KEY_HEADER: &str = "x-api-key";
 
 /// Scopes a key may carry. `*` grants everything within its workspace.
-pub const KNOWN_SCOPES: [&str; 4] = ["*", "workspace:read", "embeddings:read", "embeddings:write"];
+pub const KNOWN_SCOPES: [&str; 6] = [
+    "*",
+    "workspace:read",
+    "embeddings:read",
+    "embeddings:write",
+    "storage:read",
+    "storage:write",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiKeyPrincipal {
