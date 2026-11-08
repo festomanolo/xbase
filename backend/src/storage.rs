@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    api_keys::{self, ApiKeyPrincipal},
     auth::{AdminClaims, UserToken},
     error::{ApiError, ApiResult},
     state::AppState,
@@ -92,6 +93,77 @@ fn storage_url(base: &str, fixed: &[&str], bucket: &str, path: Option<&str>) -> 
         }
     }
     Ok(url)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Access {
+    Read,
+    Write,
+}
+
+/// Who is calling an object endpoint: a signed-in user (Storage RLS decides) or
+/// an API key (this proxy confines it to its workspace folder).
+enum Caller {
+    User(UserToken),
+    Key(ApiKeyPrincipal),
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for Caller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        if let Some(raw) = parts.headers.get(api_keys::API_KEY_HEADER) {
+            let raw = raw
+                .to_str()
+                .map_err(|_| ApiError::Unauthorized("Malformed x-api-key header".into()))?;
+            return Ok(Caller::Key(api_keys::authenticate(state, raw).await?));
+        }
+        Ok(Caller::User(UserToken::from_request_parts(parts, state).await?))
+    }
+}
+
+impl Caller {
+    fn cred(&self) -> Cred<'_> {
+        match self {
+            Caller::User(u) => Cred::User(&u.token),
+            Caller::Key(_) => Cred::Service,
+        }
+    }
+
+    /// Validates an object path for this caller. Keys need the matching scope and
+    /// may only touch `<workspace_id>/...`.
+    fn object_path(&self, path: &str, access: Access) -> ApiResult<String> {
+        let path = validate_object_path(path)?;
+        if let Caller::Key(key) = self {
+            key.require_scope(if access == Access::Write { "storage:write" } else { "storage:read" })?;
+            key_confine(key, path)?;
+        }
+        Ok(path.to_string())
+    }
+
+    /// Listing prefix: users pass it through; a key is pinned to its workspace folder.
+    fn list_prefix(&self, prefix: &str) -> ApiResult<String> {
+        let Caller::Key(key) = self else { return Ok(prefix.to_string()) };
+        key.require_scope("storage:read")?;
+        let prefix = prefix.trim_matches('/');
+        if prefix.is_empty() {
+            return Ok(key.workspace_id.to_string());
+        }
+        let prefix = validate_object_path(prefix)?;
+        key_confine(key, prefix)?;
+        Ok(prefix.to_string())
+    }
+}
+
+/// `path` must be the key's workspace folder or something inside it.
+fn key_confine(key: &ApiKeyPrincipal, path: &str) -> ApiResult<()> {
+    let first = path.split('/').next().unwrap_or_default();
+    if first.eq_ignore_ascii_case(&key.workspace_id.to_string()) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("API keys may only access objects under '<workspace_id>/'"))
+    }
 }
 
 enum Cred<'a> {
@@ -218,7 +290,7 @@ fn default_limit() -> u32 {
 
 async fn list_objects(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<ListObjects>,
 ) -> ApiResult<Json<Value>> {
