@@ -5,7 +5,10 @@
 #   docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
 #
 # Add SaaS #3..#10 by copying the `saas-api-1` block (YAML anchor below),
-# giving each a unique APP_ID, container_name and Caddy route.
+# giving each a unique APP_ID and Caddy route.
+#
+# Replicas: `docker compose up -d --scale saas-api-1=3`, or let scaler/ do it.
+# Every app with >1 replica needs RATE_LIMIT_BACKEND=postgres + REALTIME_CLUSTER=true.
 # =============================================================================
 
 x-rust-backend: &rust-backend
@@ -19,10 +22,14 @@ x-rust-backend: &rust-backend
   networks:
     - default
     - supabase_default
+  # No container_name: the autoscaler (scaler/) runs `docker compose up --scale`,
+  # which needs compose to name replicas itself (xbase-saas-api-1-1, -2, ...).
+  stop_grace_period: 30s # in-flight requests drain on SIGTERM
   deploy:
     resources:
       limits:
         memory: 64M
+        cpus: "1.0" # keep equal to cores_per_replica in scaler.json
 
 x-rust-env: &rust-env
   HOST: "0.0.0.0"
@@ -73,7 +80,6 @@ services:
   # --- SaaS #1: Rust (full platform API) ------------------------------------
   saas-api-1:
     <<: *rust-backend
-    container_name: xbase-saas-api-1
     environment:
       <<: *rust-env
       APP_ID: "saas-app-1"
@@ -84,32 +90,19 @@ services:
       EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
       METRICS_TOKEN: "${METRICS_TOKEN:-}"
 
-  # --- Horizontal scaling: a second replica of SaaS #1 ----------------------
-  # Same APP_ID, same image. Both replicas need the two cluster switches ON
-  # (set RATE_LIMIT_BACKEND=postgres and REALTIME_CLUSTER=true in the env file
-  # that compose reads), then add the replica to the Caddy upstream list.
-  #
-  # saas-api-1b:
-  #   <<: *rust-backend
-  #   container_name: xbase-saas-api-1b
-  #   environment:
-  #     <<: *rust-env
-  #     APP_ID: "saas-app-1"                     # identical to saas-api-1
-  #     RATE_LIMIT_BACKEND: "postgres"
-  #     REALTIME_CLUSTER: "true"
-  #     CORS_ALLOWED_ORIGINS: "https://app1.yourdomain.com"
-  #     STRIPE_WEBHOOK_SECRET: "${SAAS1_STRIPE_WEBHOOK_SECRET:-}"
-  #     STRIPE_PRICE_PLANS: "${SAAS1_STRIPE_PRICE_PLANS:-}"
-  #     EMBEDDING_API_URL: "${EMBEDDING_API_URL:-}"
-  #     EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
-  #     METRICS_TOKEN: "${METRICS_TOKEN:-}"
+  # --- Horizontal scaling ---------------------------------------------------
+  # Replicas of a service share its APP_ID. Scale with
+  #   docker compose ... up -d --no-recreate --scale saas-api-1=3
+  # or run scaler/ (autoscaling + zero-downtime deploys). Caddy and Prometheus
+  # discover replicas through Docker DNS. Before going above 1 replica set
+  # RATE_LIMIT_BACKEND=postgres and REALTIME_CLUSTER=true in the env file.
 
   # --- SaaS #2: Go (same feature set: storage, realtime, billing, vector) ---
   saas-api-2:
     build:
       context: ../go-backend
     image: xbase-go-backend:latest
-    container_name: xbase-saas-api-2
+    stop_grace_period: 30s
     restart: unless-stopped
     depends_on:
       - saas-api-1 # Rust backend applies the shared migrations
@@ -144,6 +137,7 @@ services:
       resources:
         limits:
           memory: 64M
+          cpus: "1.0"
 
 networks:
   supabase_default:
