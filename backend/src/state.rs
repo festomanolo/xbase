@@ -4,7 +4,8 @@ use sqlx::PgPool;
 use tokio::sync::Notify;
 
 use crate::{
-use crate::{config::AppConfig, metrics::Metrics, rate_limit::RateLimiter, realtime::RealtimeHub};
+    config::AppConfig, metrics::Metrics, rate_limit::RateLimiter, realtime::RealtimeHub, rest::SchemaCache,
+};
 
 #[derive(Clone)]
 pub struct AppState {
