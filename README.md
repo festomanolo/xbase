@@ -277,6 +277,8 @@ sudo systemctl enable --now xbase-pitr-ship.timer xbase-pitr-base.timer
 sudo xbase-pitr base-backup && sudo xbase-pitr status
 ```
 
+The Supabase image's `pg_hba.conf` has no `replication` rule, so `xbase-pitr base-backup` adds `local replication supabase_admin trust` (container-local socket only, the same trust that user already has) before each run.
+
 Postgres copies each finished WAL segment (and one every 60 s at most) to a host directory. A timer encrypts each file, uploads it with `rclone`, verifies the upload and only then deletes the local copy. A nightly `pg_basebackup` is streamed straight to the bucket, so the VPS needs no scratch disk. `xbase-pitr status --check` exits non-zero if archiving is off, WAL is piling up locally or the newest base is older than 36 h (wire it to `HEALTHCHECK_URL`).
 
 **Rehearse a restore now, not during an incident:**
