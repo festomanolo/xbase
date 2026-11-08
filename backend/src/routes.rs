@@ -42,8 +42,18 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
     let origins: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, "x-api-key".parse().unwrap(), "x-upsert".parse().unwrap()])
+        .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_headers(
+            [
+                "authorization", "content-type", "x-api-key", "x-upsert", "prefer", "accept-profile", "content-profile",
+                "tus-resumable", "upload-length", "upload-metadata", "upload-offset", "upload-checksum",
+            ]
+            .map(|h| h.parse::<header::HeaderName>().unwrap()),
+        )
+        .expose_headers(
+            ["location", "content-range", "upload-offset", "upload-length", "tus-resumable", "upload-expires"]
+                .map(|h| h.parse::<header::HeaderName>().unwrap()),
+        )
         .allow_credentials(true)
 }
 
