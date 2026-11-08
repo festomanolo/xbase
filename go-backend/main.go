@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,25 @@ import (
 )
 
 func main() {
+	// Operator subcommands (the distroless image has no curl): handled before any
+	// configuration is loaded, so they never need DATABASE_URL.
+	//   xbase-go-backend healthcheck     exit 0 iff GET /health is 200
+	//   xbase-go-backend probe [/path]   print the response body (default /metrics), exit 0 iff 200
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			code, _, err := localGet("/health")
+			os.Exit(exitCode(code, err, 200))
+		case "probe":
+			path := "/metrics"
+			if len(os.Args) > 2 {
+				path = os.Args[2]
+			}
+			code, body, err := localGet(path)
+			fmt.Print(body)
+			os.Exit(exitCode(code, err, 200))
+		}
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err)
@@ -74,4 +94,37 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// localGet fetches 127.0.0.1:$PORT<path> within 3 s, sending METRICS_TOKEN as a bearer token when set.
+func localGet(path string) (int, string, error) {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+path, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	if t := os.Getenv("METRICS_TOKEN"); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, string(body), nil
+}
+
+// exitCode: 0 = expected status, 1 = other status, 2 = could not connect.
+func exitCode(code int, err error, want int) int {
+	switch {
+	case err != nil:
+		return 2
+	case code == want:
+		return 0
+	}
+	return 1
 }

@@ -25,6 +25,26 @@ use crate::{config::AppConfig, db::create_pool, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Operator subcommands, handled before any configuration is loaded (so they never
+    // need DATABASE_URL). The slim runtime image has no curl, so the binary probes itself:
+    //   xbase-backend healthcheck        exit 0 iff GET /health is 200 (Docker HEALTHCHECK)
+    //   xbase-backend probe [/path]      print the response body (default /metrics), exit 0 iff 200
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("healthcheck") => std::process::exit(if local_get("/health").await.is_some_and(|(c, _)| c == 200) { 0 } else { 1 }),
+        Some("probe") => {
+            let path = args.next().unwrap_or_else(|| "/metrics".to_string());
+            match local_get(&path).await {
+                Some((code, body)) => {
+                    print!("{body}");
+                    std::process::exit(if code == 200 { 0 } else { 1 });
+                }
+                None => std::process::exit(2),
+            }
+        }
+        _ => {}
+    }
+
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::registry()
@@ -132,4 +152,29 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("Shutdown signal received, draining connections...");
+}
+
+/// Minimal HTTP/1.0 GET of `127.0.0.1:$PORT<path>` -> (status, body). std + tokio only,
+/// 3 s budget. Sends `Authorization: Bearer $METRICS_TOKEN` when that is set, so
+/// `probe /metrics` works on a token-protected endpoint.
+async fn local_get(path: &str) -> Option<(u16, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let port = std::env::var("PORT").ok().and_then(|p| p.trim().parse::<u16>().ok()).unwrap_or(3000);
+    let auth = std::env::var("METRICS_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n{auth}\r\n");
+        stream.write_all(req.as_bytes()).await.ok()?;
+        let mut raw = Vec::new();
+        stream.take(1 << 20).read_to_end(&mut raw).await.ok()?;
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let code = text.get(9..12)?.parse::<u16>().ok()?;
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+        Some((code, body))
+    };
+    tokio::time::timeout(Duration::from_secs(3), probe).await.ok().flatten()
 }

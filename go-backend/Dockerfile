@@ -12,4 +12,6 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/xbase-go-backend /usr/local/bin/xbase-go-backend
 EXPOSE 3000
 USER nonroot:nonroot
+HEALTHCHECK --interval=10s --timeout=4s --start-period=20s --retries=3 \
+    CMD ["/usr/local/bin/xbase-go-backend", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/xbase-go-backend"]
