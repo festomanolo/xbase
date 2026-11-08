@@ -148,6 +148,7 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 | | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT or API key |
 | | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT or API key |
 | | `POST /api/v1/storage/uploads/resumable` (TUS / multipart details) | JWT |
+| **REST** (opt-in) | `GET/POST/PATCH/DELETE /api/v1/rest/:table` | JWT |
 | **Realtime** | `GET /ws?access_token=<jwt>` | JWT |
 | **Vector** | `POST /api/v1/workspaces/:id/embeddings` · `…/embeddings/search` · `…/embeddings/reindex`, `DELETE …/embeddings/:id` | JWT or API key |
 | **Billing** | `POST /webhooks/stripe`, `POST /webhooks/lemonsqueezy` | provider signature |
