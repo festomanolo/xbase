@@ -35,6 +35,7 @@ pub async fn track(State(state): State<AppState>, req: Request, next: Next) -> R
     m.latency_micros_sum
         .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
     let counter = match resp.status().as_u16() {
+        100..=199 => &m.requests_1xx, // WebSocket upgrades (101)
         200..=299 => &m.requests_2xx,
         300..=399 => &m.requests_3xx,
         400..=499 => &m.requests_4xx,
