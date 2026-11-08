@@ -598,7 +598,6 @@ async fn delete_rows(
     Ok(Json(run(&state, &claims, &built, false).await?.0))
 }
 
-    json!({})
 }
 
 #[cfg(test)]
