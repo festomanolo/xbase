@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,10 +28,20 @@ type Server struct {
 	cfg     *config.Config
 	pool    *pgxpool.Pool
 	limiter *ratelimit.Limiter
+	metrics *metrics
+	hub     *hub
+	// httpc talks to Supabase Storage and the embeddings provider. No overall
+	// Timeout: uploads/downloads stream; per-call deadlines come from contexts.
+	httpc *http.Client
 }
 
 func New(cfg *config.Config, pool *pgxpool.Pool, limiter *ratelimit.Limiter) *Server {
-	return &Server{cfg: cfg, pool: pool, limiter: limiter}
+	return &Server{
+		cfg: cfg, pool: pool, limiter: limiter,
+		metrics: &metrics{},
+		hub:     newHub(cfg.AppID),
+		httpc:   &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 8, IdleConnTimeout: 60 * time.Second}},
+	}
 }
 
 type ctxKey int
@@ -47,7 +58,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/workspaces", s.requireUser(s.createWorkspace))
 	mux.Handle("GET /api/v1/workspaces/{id}", s.requireUser(s.getWorkspace))
 	mux.HandleFunc("GET /api/v1/server/whoami", s.whoami)
-	return s.cors(s.rateLimit(s.logRequests(mux)))
+	mux.HandleFunc("GET /metrics", s.metricsHandler)
+	s.storageRoutes(mux)
+	s.vectorRoutes(mux)
+	s.billingRoutes(mux)
+	s.realtimeRoutes(mux)
+	return s.metrics.track(s.cors(s.rateLimit(s.logRequests(mux))))
 }
 
 // --- helpers --------------------------------------------------------------
