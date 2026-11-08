@@ -9,7 +9,7 @@ use axum::{
 use serde_json::json;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, storage, vector, workspaces};
+use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, rest, storage, vector, workspaces};
 
 pub use crate::state::AppState;
 
