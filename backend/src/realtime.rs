@@ -87,9 +87,15 @@ struct Room {
     remote: HashMap<String, RemoteEntry>,
 }
 
-/// Largest cluster payload we publish (Postgres NOTIFY allows < 8000 bytes).
-pub const MAX_CLUSTER_BYTES: usize = 7000;
-const MAX_ENVELOPE_BYTES: usize = 7900;
+/// Largest client message (broadcast payload) accepted in cluster mode.
+pub const MAX_CLUSTER_BYTES: usize = 256 * 1024;
+/// Largest envelope published to other replicas.
+const MAX_ENVELOPE_BYTES: usize = MAX_CLUSTER_BYTES + 16 * 1024;
+/// Envelopes up to this size travel inside the NOTIFY payload (Postgres allows
+/// < 8000 bytes); larger ones are spilled to `xbase.realtime_spill` and only
+/// their id is NOTIFYed (claim-check), so the 8 KB limit no longer caps messages.
+pub const NOTIFY_INLINE_BYTES: usize = 7900;
+const SPILL_RETENTION_SECS: f64 = 120.0;
 const PRESENCE_SYNC_EVERY: Duration = Duration::from_secs(30);
 const REMOTE_PRESENCE_TTL: Duration = Duration::from_secs(90);
 
@@ -108,6 +114,8 @@ pub enum Envelope {
     Sync { o: String, app: String, room: String, presence: serde_json::Map<String, Value> },
     /// "I just got my first member in this room; please Sync it to me."
     Req { o: String, app: String, room: String },
+    /// Claim-check for an envelope stored in `xbase.realtime_spill`.
+    Spill { id: i64 },
 }
 
 /// Postgres channel for a SaaS app's cluster traffic (identifier-safe, <= 63 bytes).
@@ -214,6 +222,7 @@ impl RealtimeHub {
                 let Some(r) = rooms.get_mut(&room) else { return };
                 apply_remote_sync(r, &room, &o, presence);
             }
+            Envelope::Spill { .. } => {} // resolved by the listener before it gets here
             Envelope::Req { o, app, room } => {
                 if !self.for_us(&o, &app) {
                     return;
@@ -646,13 +655,13 @@ async fn handle_client_msg(
                 "payload": payload, "from": conn.claims.sub
             });
             if hub.cluster_enabled() && msg.to_string().len() > MAX_CLUSTER_BYTES {
-                return err("message too large for clustered realtime (max 7000 bytes)");
+                return err("message too large for clustered realtime (max 262144 bytes)");
             }
             if hub.broadcast(&room, conn.id, &msg) { None } else { err("join the room first") }
         }
         ClientMsg::Track { room, state } => {
             if hub.cluster_enabled() && state.to_string().len() > MAX_CLUSTER_BYTES / 2 {
-                return err("presence state too large for clustered realtime (max 3500 bytes)");
+                return err("presence state too large for clustered realtime (max 131072 bytes)");
             }
             if hub.track(&room, conn.id, Some(state)) { None } else { err("join the room first") }
         }
@@ -718,17 +727,40 @@ pub async fn run_change_listener(hub: Arc<RealtimeHub>, direct_url: String) {
 
 /// Drains hub → Postgres: every locally originated envelope becomes a
 /// `pg_notify`. Goes through the request pool (NOTIFY is fine in transaction mode).
-pub async fn run_cluster_publisher(pool: sqlx::PgPool, channel: String, mut rx: mpsc::Receiver<String>) {
+pub async fn run_cluster_publisher(pool: sqlx::PgPool, app_id: String, channel: String, mut rx: mpsc::Receiver<String>) {
     while let Some(payload) = rx.recv().await {
-        if let Err(e) = sqlx::query("select pg_notify($1, $2)")
-            .bind(&channel)
+        let res = if payload.len() <= NOTIFY_INLINE_BYTES {
+            sqlx::query("select pg_notify($1, $2)").bind(&channel).bind(&payload).execute(&pool).await.map(|_| ())
+        } else {
+            // One statement: store the body, then NOTIFY its id (same transaction,
+            // so receivers can never see the id before the row is visible).
+            sqlx::query(
+                "with s as (insert into xbase.realtime_spill (app_id, body) values ($1, $2) returning id) \
+                 select pg_notify($3, json_build_object('k', 'spill', 'id', s.id)::text) from s",
+            )
+            .bind(&app_id)
             .bind(&payload)
+            .bind(&channel)
             .execute(&pool)
             .await
-        {
-            tracing::warn!(error = %e, "cluster publish failed");
+            .map(|_| ())
+        };
+        if let Err(e) = res {
+            tracing::warn!(error = %e, bytes = payload.len(), "cluster publish failed");
         }
     }
+}
+
+/// Fetches a spilled envelope on the listener's own connection.
+async fn resolve_spill(listener: &mut PgListener, id: i64) -> Option<Envelope> {
+    let body: Option<String> = sqlx::query_scalar("select body from xbase.realtime_spill where id = $1")
+        .bind(id)
+        .fetch_optional(&mut *listener)
+        .await
+        .map_err(|e| tracing::warn!(error = %e, id, "could not read spilled cluster message"))
+        .ok()
+        .flatten();
+    serde_json::from_str(&body?).ok()
 }
 
 /// Receives other replicas' envelopes on a dedicated session connection, with
@@ -748,6 +780,11 @@ pub async fn run_cluster_listener(hub: Arc<RealtimeHub>, direct_url: String, cha
                     loop {
                         match listener.recv().await {
                             Ok(n) => match serde_json::from_str::<Envelope>(n.payload()) {
+                                Ok(Envelope::Spill { id }) => {
+                                    if let Some(env) = resolve_spill(&mut listener, id).await {
+                                        hub.apply_remote(env);
+                                    }
+                                }
                                 Ok(env) => hub.apply_remote(env),
                                 Err(e) => tracing::debug!(error = %e, "ignoring malformed cluster payload"),
                             },
@@ -772,13 +809,22 @@ pub fn spawn_cluster(state: &AppState, direct_url: String) {
     let channel = room_channel(&state.config.app_id);
     let (tx, rx) = mpsc::channel::<String>(1024);
     hub.enable_cluster(&state.config.app_id, tx);
-    tokio::spawn(run_cluster_publisher(state.pool.clone(), channel.clone(), rx));
+    tokio::spawn(run_cluster_publisher(state.pool.clone(), state.config.app_id.clone(), channel.clone(), rx));
     tokio::spawn(run_cluster_listener(hub.clone(), direct_url, channel));
+    let (pool, app_id) = (state.pool.clone(), state.config.app_id.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PRESENCE_SYNC_EVERY);
         loop {
             tick.tick().await;
             hub.cluster_tick();
+            // every replica reads a spilled message within moments; keep 2 minutes
+            let _ = sqlx::query(
+                "delete from xbase.realtime_spill where app_id = $1 and created_at < now() - make_interval(secs => $2)",
+            )
+            .bind(&app_id)
+            .bind(SPILL_RETENTION_SECS)
+            .execute(&pool)
+            .await;
         }
     });
 }
@@ -872,6 +918,14 @@ mod tests {
         b.expire_remote(Duration::ZERO);
         let leave: Value = serde_json::from_str(&b_rx.recv().await.unwrap()).unwrap();
         assert_eq!(leave["leaves"]["1"]["state"]["x"], 1);
+    }
+
+    #[test]
+    fn spill_claim_check_matches_the_sql_payload() {
+        // run_cluster_publisher NOTIFYs json_build_object('k', 'spill', 'id', <id>)
+        let env: Envelope = serde_json::from_str(r#"{"k" : "spill", "id" : 42}"#).unwrap();
+        assert!(matches!(env, Envelope::Spill { id: 42 }));
+        const { assert!(MAX_ENVELOPE_BYTES > MAX_CLUSTER_BYTES && NOTIFY_INLINE_BYTES < 8000) };
     }
 
     #[test]
