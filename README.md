@@ -115,7 +115,7 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 
 ## Part 2: The Rust Platform API
 
-By default, this exposes Supabase over plain HTTP. Before deploying a live application, you should:
+### Architectural invariants
 
 1. Point a custom domain name (or a subdomain like `api.yourdomain.com`) to your VPS's IP address.
 2. Set up a reverse proxy (like **Nginx** or **Caddy** — see [`docker/Caddyfile`](docker/Caddyfile)) to handle traffic.
