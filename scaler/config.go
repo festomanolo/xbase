@@ -60,7 +60,7 @@ type CapacityApp struct {
 }
 
 type Capacity struct {
-	PostgresMaxConnections int           `json:"postgres_max_connections"`
+	PostgresMaxConnections int `json:"postgres_max_connections"`
 	// Connections used by Supabase's own services (GoTrue, Storage, Realtime, PostgREST,
 	// Studio, Analytics...) plus superuser_reserved_connections and a safety margin.
 	ReservedConnections int           `json:"reserved_connections"`
@@ -68,14 +68,14 @@ type Capacity struct {
 }
 
 type SupavisorConfig struct {
-	APIURL         string `json:"api_url"`          // http://127.0.0.1:4000
-	APISecretEnv   string `json:"api_secret_env"`   // env var holding API_JWT_SECRET
-	DBHost         string `json:"db_host"`          // as seen from Supavisor (db)
-	DBPort         int    `json:"db_port"`          // 5432
-	DBName         string `json:"db_name"`          // postgres
-	DBUser         string `json:"db_user"`          // postgres
-	DBPasswordEnv  string `json:"db_password_env"`  // env var holding POSTGRES_PASSWORD
-	AuthQuery      string `json:"auth_query"`
+	APIURL        string `json:"api_url"`         // http://127.0.0.1:4000
+	APISecretEnv  string `json:"api_secret_env"`  // env var holding API_JWT_SECRET
+	DBHost        string `json:"db_host"`         // as seen from Supavisor (db)
+	DBPort        int    `json:"db_port"`         // 5432
+	DBName        string `json:"db_name"`         // postgres
+	DBUser        string `json:"db_user"`         // postgres
+	DBPasswordEnv string `json:"db_password_env"` // env var holding POSTGRES_PASSWORD
+	AuthQuery     string `json:"auth_query"`
 }
 
 type Config struct {
