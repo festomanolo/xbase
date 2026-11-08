@@ -411,8 +411,12 @@ pub fn build_insert(
                     .iter()
                     .filter(|c| !keys.contains(&c.name))
                     .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
-            } else {
-                format!(" on conflict ({key_sql}) do nothing")
+                    .collect();
+                if merge && !updates.is_empty() {
+                    format!(" on conflict ({key_sql}) do update set {}", updates.join(", "))
+                } else {
+                    format!(" on conflict ({key_sql}) do nothing")
+                }
             }
         }
     };
