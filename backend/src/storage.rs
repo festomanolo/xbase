@@ -295,12 +295,13 @@ async fn list_objects(
     Json(body): Json<ListObjects>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
+    let prefix = caller.list_prefix(&body.prefix)?;
     let url = storage_url(&state.config.storage_url, &["object", "list"], &id, None)?;
     let payload = json!({
-        "prefix": body.prefix, "limit": body.limit.min(1000), "offset": body.offset,
+        "prefix": prefix, "limit": body.limit.min(1000), "offset": body.offset,
         "search": body.search, "sortBy": { "column": "name", "order": "asc" }
     });
-    let req = authed(&state, state.http.post(url).json(&payload), Cred::User(&user.token))?;
+    let req = authed(&state, state.http.post(url).json(&payload), caller.cred())?;
     Ok(Json(json_response(req.send().await?).await?.1))
 }
 
