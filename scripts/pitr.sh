@@ -139,9 +139,13 @@ cmd_base_backup() {
 
   # -X fetch bundles the WAL needed for consistency; -D - streams the tar so no
   # extra disk is needed on the VPS. rcat uploads it as it is produced.
-  docker exec "$DB_CONTAINER" pg_basebackup -U "$PGUSER_ADMIN" -D - -Ft -z -X fetch -c fast -l "xbase-$stamp" \
-    | encrypt \
-    | rclone rcat "$REMOTE/base/$stamp.tar.gz$ENC_EXT" --s3-no-check-bucket
+  if ! docker exec "$DB_CONTAINER" pg_basebackup -U "$PGUSER_ADMIN" -D - -Ft -z -X fetch -c fast -l "xbase-$stamp" \
+      | encrypt \
+      | rclone rcat "$REMOTE/base/$stamp.tar.gz$ENC_EXT" --s3-no-check-bucket; then
+    # No manifest is written, so restore would ignore this object anyway — but don't leave junk behind.
+    rclone deletefile "$REMOTE/base/$stamp.tar.gz$ENC_EXT" >/dev/null 2>&1 || true
+    die "base backup $stamp failed"
+  fi
 
   # Force the in-progress WAL segment out so it archives now, not at the next timeout.
   psql_admin -c "select pg_switch_wal()" >/dev/null
