@@ -187,7 +187,7 @@ Both in-memory pieces have a shared mode. Turn them on for **every** replica of 
 
 | Setting | What it does |
 |---|---|
-| `RATE_LIMIT_BACKEND=postgres` | One token bucket per key for all replicas (`xbase.rate_limit_check`, migration `0004`). If the database is slow (>250 ms) or down, that request uses the local bucket, so a DB blip never becomes an API outage (`xbase_rate_limit_fallbacks_total`). |
+| `RATE_LIMIT_BACKEND=postgres` | One token bucket per key for all replicas (`xbase.rate_limit_check`, migration `0004`). If the database is slow (>250 ms) or down, that request uses the local bucket, so a DB blip never becomes an API outage (`xbase_rate_limit_fallbacks_total`). Size `DB_MAX_CONNECTIONS` for your concurrency: a saturated pool also triggers the fallback, which lets a few percent more than the global limit through. |
 | `REALTIME_CLUSTER=true` | Broadcast and presence are replayed to the other replicas over `NOTIFY xbase_rt_<app>`. Presence uses diffs plus a 30 s sync, and entries of a silent replica expire after 90 s. Messages are limited to about 7 KB in this mode. Needs `DIRECT_DATABASE_URL`. |
 
 Database change events (`subscribe_changes`) and background jobs already work across replicas. Add the replica to `docker-compose.saas.yml` (commented example) and to the Caddy `reverse_proxy` list. No sticky sessions are needed.
