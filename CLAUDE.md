@@ -125,10 +125,10 @@ Run these once before relying on them; `pitr.sh restore latest` doubles as the P
 
 | Area | Gap |
 | :--- | :--- |
-| Horizontal scaling | Realtime hub and rate limiter are in-memory per process. Running >1 replica of the same SaaS needs room fan-out over `NOTIFY` (or Redis) and a shared limiter. |
-| Storage via API keys | Storage endpoints accept user JWTs only (Storage RLS needs a user identity). |
-| Dynamic REST | No PostgREST-style query builder in Rust; the Supabase PostgREST container already serves `/rest/v1` for generic CRUD. |
-| PITR | Nightly logical dumps only (24h RPO). Add WAL-G/pgBackRest WAL archiving for point-in-time recovery. |
-| Go template parity | Go service covers health, me, workspaces, API-key auth and rate limiting — not storage/realtime/billing/vector. |
-| Storage policies | Create `storage.objects` RLS policies per bucket (e.g. `(storage.foldername(name))[1] = auth.uid()::text`) — not shipped as migrations because buckets are app-specific. |
+| Cluster limits | Clustered realtime messages are capped at ~7 KB (NOTIFY payload limit) and presence converges within ≤30 s after a replica crash. For larger payloads or very high fan-out, move to Redis pub/sub. The shared limiter adds one DB round-trip per request and serialises on one row per key. |
+| REST scope | No resource embedding (joins), `or=`/`and=` groups, RPC or API-key access. Use views for joins. |
+| Storage resumable (TUS) | Still user-JWT only: the response embeds the caller's token, which an API key does not have. |
+| Storage policy owner | If `postgres` does not own `storage.objects`, run `scripts/apply-storage-policies.sh` once as `supabase_admin`. A workspace of app `x` could in theory address bucket `x-1-…` by prefix; object paths are workspace-UUID-scoped so no data crosses, but prefer app slugs that are not prefixes of each other. |
+| PITR | RPO ≈ `archive_timeout` (60 s) + 1 min shipping; the restore is a rehearsal into a scratch container — promoting it to production is a deliberate manual step. Uses plain `cp`/`pg_basebackup`, not WAL-G/pgBackRest (no dependency on tools bundled in the Supabase image); switch to pgBackRest for incremental backups on multi-hundred-GB databases. |
+| Go template parity | Go still lacks the GoTrue proxy, workspace members/invitations, API-key management endpoints, the generic REST API and the durable job queue (so no `embeddings/reindex`). |
 | Multi-project Studio | Self-hosted Studio manages one cluster; isolation is logical (`app_slug` / per-SaaS schemas). |
