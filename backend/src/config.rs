@@ -195,6 +195,13 @@ impl AppConfig {
             jobs_enabled: parse_bool("JOBS_ENABLED", true)?,
             jobs_concurrency: parse("JOBS_CONCURRENCY", 2usize)?.max(1),
             realtime_enabled: parse_bool("REALTIME_ENABLED", true)?,
+            realtime_cluster: parse_bool("REALTIME_CLUSTER", false)?,
+            rest_enabled: parse_bool("REST_ENABLED", false)?,
+            rest_schemas: var("REST_SCHEMAS")
+                .map(|r| parse_list(&r))
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| vec!["public".to_string()]),
+            rest_max_rows: parse("REST_MAX_ROWS", 1000i64)?.clamp(1, 10_000),
             embedding_api_url: var("EMBEDDING_API_URL").map(|u| u.trim_end_matches('/').to_string()),
             embedding_api_key: var("EMBEDDING_API_KEY"),
             embedding_model: var("EMBEDDING_MODEL")
@@ -227,6 +234,7 @@ impl AppConfig {
             trust_proxy_headers: true,
             rate_limit_per_second: 20.0,
             rate_limit_burst: 60.0,
+            rate_limit_backend: RateLimitBackend::Memory,
             metrics_token: None,
             stripe_webhook_secret: Some("whsec_test".to_string()),
             stripe_price_plans: parse_pairs("price_pro:pro"),
@@ -235,6 +243,10 @@ impl AppConfig {
             jobs_enabled: false,
             jobs_concurrency: 1,
             realtime_enabled: true,
+            realtime_cluster: false,
+            rest_enabled: true,
+            rest_schemas: vec!["public".to_string()],
+            rest_max_rows: 1000,
             embedding_api_url: None,
             embedding_api_key: None,
             embedding_model: "text-embedding-3-small".to_string(),
