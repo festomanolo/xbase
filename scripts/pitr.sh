@@ -101,6 +101,10 @@ ensure_replication_access() {
   local hba
   hba="$(psql_admin -c 'show hba_file')"
   docker exec -u root "$DB_CONTAINER" sh -c \
+    "grep -Eq '^local[[:space:]]+replication[[:space:]]+$PGUSER_ADMIN[[:space:]]' '$hba' || echo 'local replication $PGUSER_ADMIN trust' >> '$hba'"
+  psql_admin -c 'select pg_reload_conf()' >/dev/null
+}
+
 # --- ship-wal -----------------------------------------------------------------
 cmd_ship_wal() {
   need_remote
