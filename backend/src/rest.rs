@@ -429,9 +429,9 @@ pub fn build_insert(
 
     Ok(Built {
         sql: format!(
-            "with r as (insert into {target} ({names}) \
-             select {names} from jsonb_populate_recordset(null::{target}, $1::jsonb){conflict} returning *) \
-             select {AGG} from r"
+            "with {} select {AGG} from ({}) r",
+            ctes.join(", "),
+            selects.join(" union all ")
         ),
         count_sql: None,
         binds: vec![Bind::Json(Value::Array(rows.into_iter().map(|r| Value::Object(r.clone())).collect()))],
