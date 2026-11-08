@@ -238,7 +238,15 @@ cd ../go-backend && go test -race ./...
 
 ## Part 3: The Go Template
 
-`go-backend/` provides `/health`, `/health/db`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
+`go-backend/` provides `/health`, `/health/db`, `/metrics`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It also implements, with the same routes, scopes and wire formats as the Rust backend:
+
+- **Storage:** buckets (admin), signed URLs with transforms, streaming upload/download, batch delete, TUS details; user JWT or API key confined to `<workspace_id>/`.
+- **Vector:** `…/embeddings`, `…/embeddings/search`, `DELETE …/embeddings/:id` (no `reindex`, since the Go template has no job queue).
+- **Billing:** Stripe and LemonSqueezy webhooks. The plan sync runs inside the webhook's own transaction, so the event is recorded and applied together or not at all.
+- **Realtime:** `/ws` rooms, broadcast, presence, change feed, and `REALTIME_CLUSTER` using the same envelope as Rust.
+- **Rate limiting:** memory or shared (`RATE_LIMIT_BACKEND=postgres`) with the same fail-over.
+
+Not ported: the GoTrue proxy, workspace members/invitations, API-key management, the generic REST API and the job queue. It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
 
 ```go
 err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
