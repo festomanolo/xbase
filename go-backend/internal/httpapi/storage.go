@@ -34,6 +34,10 @@ func (s *Server) storageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/v1/storage/objects/{bucket}/{path...}", s.uploadObject)
 	mux.HandleFunc("POST /api/v1/storage/objects/{bucket}/{path...}", s.uploadObject)
 	mux.HandleFunc("POST /api/v1/storage/uploads/resumable", s.resumableInfo)
+	mux.HandleFunc("POST /api/v1/storage/tus/{bucket}", s.tusCreate)
+	mux.HandleFunc("HEAD /api/v1/storage/tus/{bucket}/{token}", s.tusForward)
+	mux.HandleFunc("PATCH /api/v1/storage/tus/{bucket}/{token}", s.tusForward)
+	mux.HandleFunc("DELETE /api/v1/storage/tus/{bucket}/{token}", s.tusForward)
 }
 
 // --- pure helpers (unit-tested) ---------------------------------------------
@@ -73,6 +77,7 @@ func validateObjectPath(p string) (string, *apiError) {
 // storageCaller is who is calling an object endpoint.
 type storageCaller struct {
 	token string        // user JWT (forwarded to Storage)
+	sub   string        // the user's id (binds TUS upload URLs)
 	key   *keyPrincipal // or an API key (service role + path confinement)
 }
 
@@ -145,7 +150,7 @@ func (s *Server) storageCallerFrom(r *http.Request) (*storageCaller, *apiError) 
 	if p.key != nil {
 		return &storageCaller{key: p.key}, nil
 	}
-	return &storageCaller{token: p.token}, nil
+	return &storageCaller{token: p.token, sub: p.claims.Subject}, nil
 }
 
 // authorize sets the upstream credentials for the caller.
@@ -581,7 +586,7 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request) {
 // resumableInfo returns TUS connection details. Users only: the response embeds
 // the caller's own token, and an API key has no token to hand back.
 func (s *Server) resumableInfo(w http.ResponseWriter, r *http.Request) {
-	p, e := s.resolveUser(r)
+	c, e := s.storageCallerFrom(r)
 	if e != nil {
 		writeAPIError(w, e)
 		return
@@ -599,12 +604,21 @@ func (s *Server) resumableInfo(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, e)
 		return
 	}
-	path, e := validateObjectPath(body.Path)
+	path, e := c.objectPath(body.Path, true)
 	if e != nil {
 		writeAPIError(w, e)
 		return
 	}
-	headers := map[string]string{"authorization": "Bearer " + p.token, "x-upsert": strconv.FormatBool(body.Upsert)}
+	if c.key != nil { // a key's credential never goes to Storage: use the TUS proxy
+		writeJSON(w, http.StatusOK, map[string]any{
+			"endpoint": "/api/v1/storage/tus/" + id, "protocol": "tus-1.0.0", "chunk_size": 6 * 1024 * 1024,
+			"headers":  map[string]string{"x-upsert": strconv.FormatBool(body.Upsert)},
+			"auth":     "send your x-api-key header on every TUS request",
+			"metadata": map[string]string{"bucketName": id, "objectName": path},
+		})
+		return
+	}
+	headers := map[string]string{"authorization": "Bearer " + c.token, "x-upsert": strconv.FormatBool(body.Upsert)}
 	if s.cfg.SupabaseAnonKey != "" {
 		headers["apikey"] = s.cfg.SupabaseAnonKey
 	}
