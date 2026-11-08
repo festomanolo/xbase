@@ -26,4 +26,7 @@ COPY --from=builder /app/backend/target/release/xbase-backend /usr/local/bin/xba
 
 USER 1000:1000
 EXPOSE 3000
+# start-period covers the few seconds the app waits on the database at boot.
+HEALTHCHECK --interval=10s --timeout=4s --start-period=20s --retries=3 \
+    CMD ["/usr/local/bin/xbase-backend", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/xbase-backend"]
