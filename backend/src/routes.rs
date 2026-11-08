@@ -247,4 +247,105 @@ mod tests {
         // Without upgrade headers axum rejects before auth; either way no anonymous socket.
         assert!(status.is_client_error());
     }
+
+    fn bearer(state: &AppState) -> String {
+        let token = crate::auth::tests::sign(&state.config.supabase_jwt_secret, Uuid::new_v4(), "authenticated");
+        format!("Bearer {token}")
+    }
+
+    #[tokio::test]
+    async fn rest_api_requires_auth_and_hides_internal_schemas() {
+        let state = test_state().await;
+        let auth = bearer(&state);
+        let app = build_router(state);
+
+        let (status, _, _) = call(app.clone(), Request::builder().uri("/api/v1/rest/todos").body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Internal schemas are refused before any database access, even if listed in REST_SCHEMAS.
+        for schema in ["xbase", "auth", "storage", "pg_catalog", "not-configured"] {
+            let (status, _, _) = call(
+                app.clone(),
+                Request::builder()
+                    .uri("/api/v1/rest/workspaces")
+                    .header("authorization", &auth)
+                    .header("accept-profile", schema)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "schema {schema}");
+        }
+
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .uri("/api/v1/rest/bad%22name")
+                .header("authorization", &auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rest_api_can_be_disabled() {
+        let mut config = AppConfig::for_tests();
+        config.rest_enabled = false;
+        let state = test_state_with(config).await;
+        let auth = bearer(&state);
+        let (status, _, _) = call(
+            build_router(state),
+            Request::builder().uri("/api/v1/rest/todos").header("authorization", auth).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn storage_rejects_malformed_api_keys_and_anonymous_callers() {
+        let app = build_router(test_state().await);
+        let (status, _, _) = call(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/storage/objects/docs/list")
+                .header("x-api-key", "nope")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _, _) = call(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/storage/objects/docs/list")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unreachable_shared_rate_limiter_falls_back_to_local_bucket() {
+        let mut config = AppConfig::for_tests();
+        config.rate_limit_backend = crate::config::RateLimitBackend::Postgres;
+        let state = test_state_with(config).await;
+        let metrics = state.metrics.clone();
+        let (status, _, headers) = call(
+            build_router(state),
+            Request::builder().uri("/api/v1/me").body(Body::empty()).unwrap(),
+        )
+        .await;
+        // Database is unreachable, yet the request is served (and limited) locally.
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(headers.contains_key("x-ratelimit-remaining"));
+        assert_eq!(metrics.rate_limit_fallbacks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 }
