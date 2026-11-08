@@ -3,9 +3,7 @@ package httpapi
 // Vector / AI search with pgvector — same endpoints and semantics as
 // backend/src/vector.rs. Works with user JWTs (RLS-enforced) and API keys
 // (embeddings:read / embeddings:write, bound to one workspace).
-//
-// Not ported: POST .../embeddings/reindex — the Rust backend runs it on its
-// durable job queue, which this template deliberately does not have.
+// POST .../embeddings/reindex runs on the durable job queue (jobs.go).
 
 import (
 	"bytes"
@@ -32,6 +30,7 @@ const (
 func (s *Server) vectorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/workspaces/{id}/embeddings", s.upsertEmbeddings)
 	mux.HandleFunc("POST /api/v1/workspaces/{id}/embeddings/search", s.searchEmbeddings)
+	mux.HandleFunc("POST /api/v1/workspaces/{id}/embeddings/reindex", s.reindexEmbeddings)
 	mux.HandleFunc("DELETE /api/v1/workspaces/{id}/embeddings/{embedding_id}", s.deleteEmbedding)
 }
 
