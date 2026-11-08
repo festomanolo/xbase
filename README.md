@@ -117,9 +117,77 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 
 ### Architectural invariants
 
-1. Point a custom domain name (or a subdomain like `api.yourdomain.com`) to your VPS's IP address.
-2. Set up a reverse proxy (like **Nginx** or **Caddy** — see [`docker/Caddyfile`](docker/Caddyfile)) to handle traffic.
-3. Secure the connection with a free SSL certificate from Let's Encrypt.
+1. **Supavisor transaction mode (`6543`)** for every request, with SQLx's prepared-statement cache disabled (`statement_cache_capacity(0)`). Migrations and `LISTEN` use the direct `5432` connection (`DIRECT_DATABASE_URL`).
+2. **Zero-network auth:** Supabase JWTs are verified locally with `SUPABASE_JWT_SECRET`, in about a microsecond with no round-trip to GoTrue.
+3. **Postgres is the authorization layer.** `rls::begin_rls` opens a transaction and sets `role = authenticated` and `request.jwt.claims` as transaction-local settings, exactly as PostgREST does. `auth.uid()` and every RLS policy then apply natively. Billing columns are protected by column-level grants, so users cannot change their own `plan`.
+
+### Endpoints
+
+| Area | Method & Path | Auth |
+|---|---|---|
+| Health | `GET /health`, `GET /health/db`, `GET /metrics` | public / `METRICS_TOKEN` |
+| Me | `GET /api/v1/me` | JWT |
+| **Auth** | `POST /api/v1/auth/signup` · `token` (password) · `refresh` · `otp` · `magiclink` · `verify` · `recover` · `exchange` (PKCE) · `logout` | public / JWT |
+| | `GET /api/v1/auth/authorize?provider=github&redirect_to=…` (OAuth redirect) | public |
+| | `GET/PUT /api/v1/auth/user` | JWT |
+| | `GET/POST /api/v1/admin/users`, `GET/PUT/DELETE /api/v1/admin/users/:id` | service_role or `ADMIN_USER_IDS` |
+| **Workspaces** | `GET/POST /api/v1/workspaces`, `GET/PATCH/DELETE /api/v1/workspaces/:id` | JWT (GET also API key) |
+| | `GET /api/v1/workspaces/:id/members`, `PATCH/DELETE …/members/:user_id` | JWT |
+| | `GET/POST /api/v1/workspaces/:id/invitations`, `DELETE …/invitations/:id`, `POST /api/v1/invitations/accept` | JWT |
+| | `GET /api/v1/tenants/:app_slug` (legacy) | JWT |
+| **API keys** | `GET/POST /api/v1/workspaces/:id/api-keys`, `DELETE …/api-keys/:key_id` | JWT (owner/admin) |
+| | `GET /api/v1/server/whoami` | `x-api-key` |
+| **Storage** | `GET/POST /api/v1/storage/buckets`, `DELETE …/buckets/:bucket?force=true` | admin |
+| | `POST /api/v1/storage/objects/:bucket/list` · `sign-upload` · `sign-download` (with `transform`) | JWT |
+| | `GET/PUT/POST /api/v1/storage/objects/:bucket/*path` (streaming), `DELETE /api/v1/storage/objects/:bucket` | JWT |
+| | `POST /api/v1/storage/uploads/resumable` (TUS / multipart details) | JWT |
+| **Realtime** | `GET /ws?access_token=<jwt>` | JWT |
+| **Vector** | `POST /api/v1/workspaces/:id/embeddings` · `…/embeddings/search` · `…/embeddings/reindex`, `DELETE …/embeddings/:id` | JWT or API key |
+| **Billing** | `POST /webhooks/stripe`, `POST /webhooks/lemonsqueezy` | provider signature |
+
+Workspace roles are `owner > admin > member > viewer`. Owners delete the workspace. Owners and admins rename it, manage members, invite people and create API keys. Members write embeddings. Every member can read.
+
+### Realtime protocol
+
+```js
+const ws = new WebSocket(`wss://app1-api.yourdomain.com/ws?access_token=${session.access_token}`);
+ws.send(JSON.stringify({ type: "join", room: `workspace:${workspaceId}` }));   // private, members only
+ws.send(JSON.stringify({ type: "track", room: `workspace:${workspaceId}`, state: { status: "online" } }));
+ws.send(JSON.stringify({ type: "broadcast", room: `workspace:${workspaceId}`, event: "cursor", payload: { x, y } }));
+ws.send(JSON.stringify({ type: "subscribe_changes", workspace_id: workspaceId })); // Postgres CDC
+// ← joined · presence_state · presence_diff · broadcast · change · error
+```
+
+To add CDC to your own tables, attach the trigger. Any table with a `workspace_id` column works:
+
+```sql
+create trigger trg_projects_notify after insert or update or delete on saas1.projects
+  for each row execute function xbase.notify_change();
+```
+
+### Billing
+
+Pass the workspace id at checkout: Stripe `client_reference_id` / `subscription_data.metadata.workspace_id`, or LemonSqueezy `checkout_data.custom.workspace_id`. Map prices to plans with `STRIPE_PRICE_PLANS=price_123:pro`. The webhook verifies the signature, stores the event idempotently and returns immediately. A background job then updates `plan`, `subscription_status` and `current_period_end`. Cancelled or expired subscriptions fall back to `free`.
+
+### Background jobs
+
+```rust
+jobs::enqueue(&state.pool, &state.config.app_id, "emails.welcome", &json!({ "user_id": id })).await?;
+```
+
+Add the handler in `jobs::dispatch`. Jobs retry with exponential backoff (up to 8 attempts). Stuck jobs are re-queued after 10 minutes, and completed jobs are pruned after 7 days.
+
+### Vector search
+
+Set `EMBEDDING_API_URL`. Any OpenAI-compatible endpoint works, including Ollama at `http://ollama:11434/v1`. Then send `{"items":[{"external_id":"doc1","content":"…"}]}` to `…/embeddings` and `{"query":"…","filter":{"lang":"en"}}` to `…/embeddings/search`. The vector dimension is `1536`; change `vector(1536)` in `0003` and `EMBEDDING_DIMS` together before first deploy.
+
+### Develop & test
+
+```bash
+cd backend && cp .env.example .env && cargo run
+cargo test                      # unit + HTTP tests (no database needed)
+cd ../go-backend && go test ./...
+```
 
 ---
 
