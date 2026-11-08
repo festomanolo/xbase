@@ -28,13 +28,15 @@ use crate::{
 pub const API_KEY_HEADER: &str = "x-api-key";
 
 /// Scopes a key may carry. `*` grants everything within its workspace.
-pub const KNOWN_SCOPES: [&str; 6] = [
+pub const KNOWN_SCOPES: [&str; 8] = [
     "*",
     "workspace:read",
     "embeddings:read",
     "embeddings:write",
     "storage:read",
     "storage:write",
+    "rest:read",
+    "rest:write",
 ];
 
 #[derive(Debug, Clone, Serialize)]
