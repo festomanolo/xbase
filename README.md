@@ -1,6 +1,20 @@
 # xbase
 
-High-performance, self-hosted **Supabase + Rust (Axum & SQLx)** multi-SaaS platform architecture designed to run **10+ SaaS applications on a single VPS** with minimal RAM footprint (<15MB per backend service) and Supavisor connection pooling.
+A self-hosted, **Supabase-compatible backend platform** for running **10+ SaaS applications on a single Linux VPS**. It pairs the official self-hosted Supabase stack (Postgres, GoTrue, Storage, Supavisor) with:
+
+* **`backend/`**: a **Rust (Axum + SQLx)** platform API. It covers auth, RLS-enforced CRUD, storage, realtime WebSockets with Postgres CDC, pgvector search, billing webhooks, background jobs, API keys, rate limiting and Prometheus metrics. It idles at roughly 10–15 MB of RAM.
+* **`go-backend/`**: a lean **Go (net/http + pgx)** service template. It uses the same conventions (Supavisor pooling, local JWT verification, RLS impersonation, API keys, rate limiting) for SaaS backends you'd rather write in Go.
+* Ops tooling for the parts Supabase Cloud provides and self-hosting doesn't: encrypted off-site backups, database branching, monitoring/alerting, SMTP and OAuth configuration.
+
+```text
+                       ┌──────────── Caddy (Let's Encrypt TLS) ────────────┐
+                       │                                                   │
+          api.domain ──┤──► Kong ──► GoTrue · Storage · PostgREST · Studio │
+     app1-api.domain ──┤──► saas-api-1 (Rust)  ─┐                          │
+     app2-api.domain ──┤──► saas-api-2 (Go)    ─┼─► Supavisor :6543 ──► Postgres (+pgvector)
+                ...  ──┤──► saas-api-N         ─┘        ▲                 │
+                       └──────────────────────── LISTEN/NOTIFY :5432 ──────┘
+```
 
 ---
 
