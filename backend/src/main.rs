@@ -153,3 +153,28 @@ async fn shutdown_signal() {
     }
     tracing::info!("Shutdown signal received, draining connections...");
 }
+
+/// Minimal HTTP/1.0 GET of `127.0.0.1:$PORT<path>` -> (status, body). std + tokio only,
+/// 3 s budget. Sends `Authorization: Bearer $METRICS_TOKEN` when that is set, so
+/// `probe /metrics` works on a token-protected endpoint.
+async fn local_get(path: &str) -> Option<(u16, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let port = std::env::var("PORT").ok().and_then(|p| p.trim().parse::<u16>().ok()).unwrap_or(3000);
+    let auth = std::env::var("METRICS_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let req = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n{auth}\r\n");
+        stream.write_all(req.as_bytes()).await.ok()?;
+        let mut raw = Vec::new();
+        stream.take(1 << 20).read_to_end(&mut raw).await.ok()?;
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let code = text.get(9..12)?.parse::<u16>().ok()?;
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+        Some((code, body))
+    };
+    tokio::time::timeout(Duration::from_secs(3), probe).await.ok().flatten()
+}
