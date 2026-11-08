@@ -117,8 +117,9 @@ Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25
 | Shared limiter | `rate_limit_check`: sequential refill, key isolation, grants; 200 concurrent calls on a burst of 50 allowed exactly 50. Through two real replicas (Rust and Go) the global limit held. |
 | REST (Rust) | 27 HTTP checks: CRUD, filters/order/paging/count, upsert, bad casts → 400, SQL-looking values stored literally, RLS isolation between users, internal schemas refused. |
 | Realtime cluster (Rust + Go) | Real WebSockets on two replicas: cross-replica broadcast and presence, late-joiner sync, leave diffs, oversize rejection, DB change feed on both replicas, and recovery after every `LISTEN` backend was terminated. |
-4. `pitr.sh`: `pg_basebackup -D - -Ft -z -X fetch`, the archive_command, `ship-wal`, `restore` and recovery in the throwaway container (relies on GNU `date`/`flock`, `rclone`, `age`).
-5. Go billing/vector SQL (`::extensions.vector`, the subscription update) against the real schema.
+| Storage (Rust + Go) | 25 checks each through the proxy to the real Storage API: owner/viewer/outsider RLS, signed URLs (and fetching them), API key confined to `<workspace_id>/`, traversal, user-only TUS. |
+| Go vector / billing | pgvector search (`::extensions.vector`), metadata filter, upsert, key scope + workspace binding, Stripe and LemonSqueezy plan sync, idempotent replay, bad/stale signatures. |
+| PITR | WAL archiving from `supabase-pitr.override.yml`, base backup → age → rclone, WAL shipping, then `DROP TABLE` and a restore to a point just before it (150 rows back, 0 rows from after the target). `archive_command` verified for new / identical / different files. |
 
 Run these once before relying on them; `pitr.sh restore latest` doubles as the PITR rehearsal.
 
