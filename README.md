@@ -195,27 +195,12 @@ cd ../go-backend && go test ./...
 
 `go-backend/` provides `/health`, `/health/db`, `/api/v1/me`, workspace list/create/get (RLS-enforced through `db.WithRLS`), and `/api/v1/server/whoami` (API keys). It shares the same `.env` names as the Rust backend. pgx runs in `QueryExecModeExec`, so no prepared statement outlives a transaction behind Supavisor. Run the Rust backend once first, because it owns the shared migrations.
 
-In fact, Supabase itself is built for extreme performance using these exact languages: its authentication server (GoTrue) is written in Go, and its Edge Functions runtime (Deno) is built on Rust.
-
-### 1. The Direct Database Approach (Maximum Speed)
-
-Because Supabase is ultimately just a standard PostgreSQL database under the hood, your custom backend does not have to communicate through Supabase's REST API. You can connect your Rust or Go server directly to the Postgres instance for raw, unthrottled performance.
-
-* **In Rust:** Use **`sqlx`** for highly performant, fully asynchronous, compile-time or runtime checked SQL queries (implemented in [`backend/`](backend)), or **`diesel`** if you prefer a traditional ORM.
-* **In Go:** Use **`pgx`**, which is widely considered the fastest PostgreSQL driver for Go. It supports advanced Postgres features and connection pooling natively.
-
-**How it works:** Your Rust/Go backend handles the heavy business logic, background jobs, and payment processing (like Stripe webhooks) by talking directly to Postgres on the server. You then leave the Supabase client SDKs on the frontend to handle authentication, file storage, and real-time sockets.
-
-### 2. Using Supabase SDKs for Go and Rust
-
-If your custom backend needs to interact with Supabase's specific features (like creating users in Auth or uploading files to Storage), you can use the community-maintained SDKs:
-
-* **Go:** The `supabase-community/supabase-go` library allows you to interact with Auth, Storage, and the PostgREST API.
-* **Rust:** The `supabase-rs` crate provides similar functionality for interacting with the Supabase ecosystem from your Rust server.
-
-### 3. Rust via WebAssembly in Edge Functions
-
-If you want to write Rust but don't want to manage a separate backend server process at all, Supabase Edge Functions run on Deno (a modern JavaScript/TypeScript runtime). Deno natively supports WebAssembly (Wasm). You can write your high-performance algorithms in Rust, compile them to Wasm, and execute them directly inside Supabase's serverless Edge Functions.
+```go
+err := db.WithRLS(ctx, pool, claims, func(tx pgx.Tx) error {
+    _, err := tx.Exec(ctx, "insert into saas2.todos (workspace_id, title) values ($1, $2)", wsID, title)
+    return err
+})
+```
 
 ---
 
