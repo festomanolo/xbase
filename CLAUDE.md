@@ -38,7 +38,8 @@ xbase/
 │   ├── rate_limit.rs # token bucket keyed api-key > user > IP; backend memory | postgres (shared across replicas)
 │   ├── metrics.rs    # Prometheus text /metrics
 │   └── routes.rs     # build_router + HTTP tests
-├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, rate limit
+├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, shared rate limit,
+│   └── internal/httpapi/              #   storage, vector, billing, realtime (+cluster), /metrics (same wire protocols as Rust)
 ├── docker/
 │   ├── docker-compose.saas.yml        # Rust saas-api-1 + Go saas-api-2 + Caddy (build context = repo root)
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
