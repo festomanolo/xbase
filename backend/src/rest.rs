@@ -394,8 +394,12 @@ pub fn build_insert(
             return Err(ApiError::bad_request("Every row must set at least one column"));
         }
         let value = Value::Object(row.clone());
-                .iter()
-                .filter(|c| !keys.contains(&c.name))
+        match groups.iter_mut().find(|(g, _)| g.len() == used.len() && g.iter().zip(&used).all(|(a, b)| a.name == b.name)) {
+            Some((_, rows)) => rows.push(value),
+            None => groups.push((used, vec![value])),
+        }
+    }
+
                 .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
                 .collect();
             if merge && !updates.is_empty() {
