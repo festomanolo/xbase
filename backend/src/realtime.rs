@@ -46,7 +46,7 @@ use axum::{
     routing::get,
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::PgListener;
 use tokio::sync::{broadcast, mpsc};
@@ -72,9 +72,49 @@ struct RoomMember {
     presence: Option<Value>,
 }
 
+/// Presence entry mirrored from another replica.
+struct RemoteEntry {
+    origin: String,
+    user_id: Uuid,
+    state: Value,
+    seen: Instant,
+}
+
 #[derive(Default)]
 struct Room {
     members: HashMap<ConnId, RoomMember>,
+    /// Presence held by connections on other replicas, keyed by conn id.
+    remote: HashMap<String, RemoteEntry>,
+}
+
+/// Largest cluster payload we publish (Postgres NOTIFY allows < 8000 bytes).
+pub const MAX_CLUSTER_BYTES: usize = 7000;
+const MAX_ENVELOPE_BYTES: usize = 7900;
+const PRESENCE_SYNC_EVERY: Duration = Duration::from_secs(30);
+const REMOTE_PRESENCE_TTL: Duration = Duration::from_secs(90);
+
+struct ClusterLink {
+    tx: mpsc::Sender<String>,
+    app: String,
+}
+
+/// Wire format on the cluster channel. `o` = origin replica id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Envelope {
+    /// A message (broadcast or presence_diff) to replay into local room members.
+    Msg { o: String, app: String, room: String, msg: Value },
+    /// Full presence of the origin replica for one room.
+    Sync { o: String, app: String, room: String, presence: serde_json::Map<String, Value> },
+    /// "I just got my first member in this room; please Sync it to me."
+    Req { o: String, app: String, room: String },
+}
+
+/// Postgres channel for a SaaS app's cluster traffic (identifier-safe, <= 63 bytes).
+pub fn room_channel(app_id: &str) -> String {
+    let mut c = format!("xbase_rt_{}", app_id.replace('-', "_"));
+    c.truncate(63);
+    c
 }
 
 /// Change event decoded from `pg_notify('xbase_changes', ...)`.
