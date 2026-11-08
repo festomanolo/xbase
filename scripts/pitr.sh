@@ -150,6 +150,7 @@ cmd_base_backup() {
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   log "base backup $stamp ..."
+  ensure_replication_access
 
   # -X fetch bundles the WAL needed for consistency; -D - streams the tar so no
   # extra disk is needed on the VPS. rcat uploads it as it is produced.
