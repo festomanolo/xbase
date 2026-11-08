@@ -296,7 +296,13 @@ impl RealtimeHub {
         let r = rooms.entry(room.to_string()).or_default();
         let first_local = r.members.is_empty();
         r.members.insert(conn, RoomMember { tx, user_id, presence: None });
-        presence_snapshot(r)
+        let snapshot = presence_snapshot(r);
+        if first_local {
+            if let Some(link) = self.cluster.get() {
+                self.publish(&Envelope::Req { o: self.origin.clone(), app: link.app.clone(), room: room.to_string() });
+            }
+        }
+        snapshot
     }
 
     fn leave(&self, room: &str, conn: ConnId) {
@@ -312,6 +318,7 @@ impl RealtimeHub {
                 "leaves": { conn.to_string(): { "user_id": user_id, "state": state } }
             });
             fan_out(r, None, &diff);
+            self.publish_msg(room, diff);
         }
         if r.members.is_empty() {
             rooms.remove(room);
@@ -323,6 +330,7 @@ impl RealtimeHub {
         match rooms.get(room) {
             Some(r) if r.members.contains_key(&from) => {
                 fan_out(r, Some(from), msg);
+                self.publish_msg(room, msg.clone());
                 true
             }
             _ => false,
