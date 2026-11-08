@@ -74,7 +74,7 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 
 ---
 
-## What Is Currently Implemented
+## What Is Implemented
 
 - [x] Self-hosted Supabase bootstrap script (`scripts/bootstrap-supabase.sh`) with automated cryptographic secret generation (`POSTGRES_PASSWORD`, `JWT_SECRET`, `DASHBOARD_PASSWORD`, `SECRET_KEY_BASE`, `VAULT_ENC_KEY`).
 - [x] Companion Docker Compose stack (`docker/docker-compose.saas.yml`) & `docker/Caddyfile` reverse proxy for automatic Let's Encrypt TLS.
