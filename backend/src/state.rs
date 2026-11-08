@@ -17,6 +17,7 @@ pub struct AppState {
     /// Wakes background job workers immediately after a job is enqueued.
     pub jobs_notify: Arc<Notify>,
     pub metrics: Arc<Metrics>,
+    /// Column/type lookups for the generic REST API.
 }
 
 impl AppState {
