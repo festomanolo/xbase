@@ -38,8 +38,9 @@ xbase/
 │       ├── gotrue.rs      # sign-up/in, OTP, magic link, OAuth+PKCE, refresh, recovery, admin users
 │       ├── workspaces.rs  # workspace / member / invitation CRUD
 │       ├── api_keys.rs    # hashed x-api-key management + authentication
-│       ├── storage.rs     # buckets, signed URLs, streaming upload/download, TUS, image transforms
-│       ├── realtime.rs    # /ws rooms, broadcast, presence, Postgres change streams
+│       ├── storage.rs     # buckets, signed URLs, streaming upload/download, TUS, transforms; JWT or API key
+│       ├── realtime.rs    # /ws rooms, broadcast, presence, change streams, multi-replica fan-out
+│       ├── rest.rs        # PostgREST-style CRUD under RLS (opt-in)
 │       ├── vector.rs      # pgvector upsert/search, server-side embeddings, reindex job
 │       ├── billing.rs     # Stripe + LemonSqueezy webhooks → workspace plan sync
 │       ├── jobs.rs        # durable SKIP LOCKED job queue with retries/backoff
