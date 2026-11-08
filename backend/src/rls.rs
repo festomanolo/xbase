@@ -11,7 +11,7 @@
 use futures_util::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
-use crate::{auth::SupabaseClaims, error::ApiError};
+use crate::{api_keys::ApiKeyPrincipal, auth::SupabaseClaims, error::ApiError};
 
 const ALLOWED_ROLES: [&str; 3] = ["authenticated", "anon", "service_role"];
 
@@ -34,7 +34,10 @@ pub async fn begin_rls(
         "select set_config('request.jwt.claims', $1, true), \
                 set_config('request.jwt.claim.sub', $2, true), \
                 set_config('request.jwt.claim.role', $3, true), \
-                set_config('role', $3, true)",
+                set_config('role', $3, true), \
+                set_config('xbase.key_workspace_id', '', true), \
+                set_config('xbase.key_id', '', true), \
+                set_config('xbase.key_app_slug', '', true)",
     )
     .bind(claims_json)
     .bind(claims.sub.to_string())
@@ -42,6 +45,39 @@ pub async fn begin_rls(
     .execute(&mut *tx)
     .await?;
 
+    Ok(tx)
+}
+
+/// Opens a transaction for an API key that must stay under RLS (the generic REST
+/// API). It runs as `authenticated` with **no user id**, and exposes the key's
+/// workspace through `xbase.request_workspace_id()` (migration 0006), so a table
+/// admits keys only if one of its policies says so. A key can therefore never see
+/// more than an anonymous signed-in user plus what policies grant its workspace.
+pub async fn begin_rls_for_key(
+    pool: &PgPool,
+    key: &ApiKeyPrincipal,
+) -> Result<Transaction<'static, Postgres>, ApiError> {
+    let claims = serde_json::json!({
+        "role": "authenticated",
+        "xbase_api_key": { "key_id": key.key_id, "workspace_id": key.workspace_id, "app_slug": key.app_slug },
+    })
+    .to_string();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "select set_config('request.jwt.claims', $1, true), \
+                set_config('request.jwt.claim.sub', '', true), \
+                set_config('request.jwt.claim.role', 'authenticated', true), \
+                set_config('role', 'authenticated', true), \
+                set_config('xbase.key_workspace_id', $2, true), \
+                set_config('xbase.key_id', $3, true), \
+                set_config('xbase.key_app_slug', $4, true)",
+    )
+    .bind(claims)
+    .bind(key.workspace_id.to_string())
+    .bind(key.key_id.to_string())
+    .bind(&key.app_slug)
+    .execute(&mut *tx)
+    .await?;
     Ok(tx)
 }
 
