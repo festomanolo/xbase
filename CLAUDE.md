@@ -121,7 +121,9 @@ Run against `supabase/postgres:17.6.1.136`, the real `supabase/storage-api:v1.25
 | Go vector / billing | pgvector search (`::extensions.vector`), metadata filter, upsert, key scope + workspace binding, Stripe and LemonSqueezy plan sync, idempotent replay, bad/stale signatures. |
 | PITR | WAL archiving from `supabase-pitr.override.yml`, base backup → age → rclone, WAL shipping, then `DROP TABLE` and a restore to a point just before it (150 rows back, 0 rows from after the target). `archive_command` verified for new / identical / different files. |
 
-Run these once before relying on them; `pitr.sh restore latest` doubles as the PITR rehearsal.
+Bugs found and fixed by this run: (1) REST batch insert forced omitted columns to `NULL` instead of their `DEFAULT` (now one `INSERT` per distinct key set); (2) `pg_basebackup` was refused because the Supabase image's `pg_hba.conf` has no `replication` rule (`pitr.sh` now adds `local replication <admin> trust` idempotently before each base backup); plus a noisy first-run prune error.
+
+Still not covered: GoTrue/auth flows, the Rust job worker path for billing, image transforms, TUS uploads, and a real S3/R2 remote for `rclone` (a local-directory remote was used). The shared limiter fails open to the per-replica bucket when its query exceeds 250 ms; with a tiny pool (`DB_MAX_CONNECTIONS=5`) a burst of ~150 concurrent requests per replica caused that fallback and let ~5% more than the global limit through — size the pool for your concurrency or accept that degradation.
 
 ---
 
