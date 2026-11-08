@@ -399,13 +399,14 @@ async fn sign_download(
 /// Streams an object back to the caller (for private files you don't want to sign).
 async fn download_object(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path((bucket, path)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&path)?;
+    let path = caller.object_path(&path, Access::Read)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "authenticated"], &id, Some(path))?;
-    let resp = authed(&state, state.http.get(url), Cred::User(&user.token))?
+    let resp = authed(&state, state.http.get(url), caller.cred())?
         .send()
         .await?;
     if !resp.status().is_success() {
