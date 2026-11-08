@@ -18,6 +18,7 @@ pub struct AppState {
     pub jobs_notify: Arc<Notify>,
     pub metrics: Arc<Metrics>,
     /// Column/type lookups for the generic REST API.
+    pub rest_cache: Arc<SchemaCache>,
 }
 
 impl AppState {
