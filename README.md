@@ -155,6 +155,43 @@ The callback URL for every provider is `https://api.yourdomain.com/auth/v1/callb
 
 Workspace roles are `owner > admin > member > viewer`. Owners delete the workspace. Owners and admins rename it, manage members, invite people and create API keys. Members write embeddings. Every member can read.
 
+### Storage with API keys and policies
+
+Name objects `<workspace_id>/<path>` inside bucket `<APP_ID>-<name>`. Migration `0005` installs `storage.objects` policies on that convention: workspace members read, owners/admins/members write. If it prints `skipped storage.objects policies` (the migration user does not own the table), run `./scripts/apply-storage-policies.sh` once.
+
+Server-to-server callers use an API key with scope `storage:read` and/or `storage:write` (or `*`). The key runs with the service role, so the backend pins it to its own workspace: any path outside `<its workspace_id>/` is refused, and listings are forced to that folder. Resumable (TUS) uploads stay user-only.
+
+```bash
+curl -X PUT "$API/api/v1/storage/objects/docs/$WORKSPACE_ID/reports/q3.pdf" \
+     -H "x-api-key: $XB_KEY" -H "content-type: application/pdf" --data-binary @q3.pdf
+```
+
+### Generic REST API
+
+Set `REST_ENABLED=true` (and `REST_SCHEMAS`, default `public`) to get PostgREST-style CRUD from the Rust backend. Every request runs under the caller's RLS role, so grants and policies are the authorization layer; `xbase`, `auth`, `storage` and other internal schemas are never reachable.
+
+```bash
+GET    /api/v1/rest/todos?select=id,title&done=eq.false&title=ilike.*milk*&order=created_at.desc&limit=20
+GET    /api/v1/rest/todos?id=in.(1,2,3)&deleted_at=is.null        # Prefer: count=exact → Content-Range
+POST   /api/v1/rest/todos        {"title":"x"}  |  [{"title":"a"},{"title":"b"}]
+POST   /api/v1/rest/todos?on_conflict=id   (Prefer: resolution=merge-duplicates)   # upsert
+PATCH  /api/v1/rest/todos?id=eq.7   {"done":true}            # a filter is mandatory
+DELETE /api/v1/rest/todos?id=eq.7                            # a filter is mandatory
+```
+
+Operators: `eq neq gt gte lt lte like ilike is in`, each negatable with `not.`. Use `Accept-Profile` / `Content-Profile` to pick another allowed schema. Joins, `or=`/`and=` and RPC are not supported (use a view). Table and column names are validated against the catalog and values are always bound parameters.
+
+### Running more than one replica
+
+Both in-memory pieces have a shared mode. Turn them on for **every** replica of the app:
+
+| Setting | What it does |
+|---|---|
+| `RATE_LIMIT_BACKEND=postgres` | One token bucket per key for all replicas (`xbase.rate_limit_check`, migration `0004`). If the database is slow (>250 ms) or down, that request uses the local bucket, so a DB blip never becomes an API outage (`xbase_rate_limit_fallbacks_total`). |
+| `REALTIME_CLUSTER=true` | Broadcast and presence are replayed to the other replicas over `NOTIFY xbase_rt_<app>`. Presence uses diffs plus a 30 s sync, and entries of a silent replica expire after 90 s. Messages are limited to about 7 KB in this mode. Needs `DIRECT_DATABASE_URL`. |
+
+Database change events (`subscribe_changes`) and background jobs already work across replicas. Add the replica to `docker-compose.saas.yml` (commented example) and to the Caddy `reverse_proxy` list. No sticky sessions are needed.
+
 ### Realtime protocol
 
 ```js
