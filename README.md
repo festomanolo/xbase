@@ -61,6 +61,8 @@ xbase/
     ├── backup-postgres.sh             # encrypted pg_dump → S3 / R2 / B2 (age or openssl + rclone)
     ├── restore-postgres.sh            # verified restore into a fresh database
     ├── install-backups.sh             # nightly systemd timer
+    ├── pitr.sh / install-pitr.sh      # WAL shipping, base backups, point-in-time restore
+    ├── apply-storage-policies.sh      # install storage.objects policies as the DB superuser
     └── db-branch.sh                   # ephemeral per-PR database branches
 ```
 
