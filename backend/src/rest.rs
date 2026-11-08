@@ -598,7 +598,6 @@ async fn delete_rows(
     Ok(Json(run(&state, &claims, &built, false).await?.0))
 }
 
-#[allow(dead_code)]
 fn _shape() -> serde_json::Value {
     json!({})
 }
