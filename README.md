@@ -47,7 +47,7 @@ xbase/
 │       ├── rate_limit.rs  # token bucket per API key / user / IP (memory or shared via Postgres)
 │       ├── metrics.rs     # Prometheus /metrics
 │       └── routes.rs      # router assembly + HTTP tests
-├── go-backend/                        # Go service template (pgx, golang-jwt)
+├── go-backend/                        # Go service: storage, vector, billing, realtime, shared limiter (pgx)
 ├── docker/
 │   ├── docker-compose.saas.yml        # Rust + Go SaaS backends + Caddy
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
