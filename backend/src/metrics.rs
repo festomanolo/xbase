@@ -14,6 +14,7 @@ use crate::{auth::bearer_token, state::AppState};
 
 #[derive(Default)]
 pub struct Metrics {
+    pub requests_1xx: AtomicU64,
     pub requests_2xx: AtomicU64,
     pub requests_3xx: AtomicU64,
     pub requests_4xx: AtomicU64,
