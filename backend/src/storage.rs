@@ -315,18 +315,19 @@ struct SignUpload {
 /// Returns a one-time URL the browser can PUT the file to directly (no proxying).
 async fn sign_upload(
     State(state): State<AppState>,
-    user: UserToken,
+    caller: Caller,
     Path(bucket): Path<String>,
     Json(body): Json<SignUpload>,
 ) -> ApiResult<Json<Value>> {
     let id = scoped_bucket(&state.config.app_id, &bucket)?;
-    let path = validate_object_path(&body.path)?;
+    let path = caller.object_path(&body.path, Access::Write)?;
+    let path = path.as_str();
     let url = storage_url(&state.config.storage_url, &["object", "upload", "sign"], &id, Some(path))?;
     let mut req = state.http.post(url);
     if body.upsert {
         req = req.header("x-upsert", "true");
     }
-    let req = authed(&state, req, Cred::User(&user.token))?;
+    let req = authed(&state, req, caller.cred())?;
     let (_, resp) = json_response(req.send().await?).await?;
     let rel = resp["url"].as_str().unwrap_or_default();
     Ok(Json(json!({
