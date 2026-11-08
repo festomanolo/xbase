@@ -434,7 +434,7 @@ pub fn build_insert(
             selects.join(" union all ")
         ),
         count_sql: None,
-        binds: vec![Bind::Json(Value::Array(rows.into_iter().map(|r| Value::Object(r.clone())).collect()))],
+        binds,
     })
 }
 
