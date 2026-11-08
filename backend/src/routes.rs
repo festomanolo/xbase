@@ -9,7 +9,7 @@ use axum::{
 use serde_json::json;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, storage, vector, workspaces};
+use crate::{api_keys, auth::SupabaseClaims, billing, gotrue, metrics, rate_limit, realtime, rest, storage, vector, workspaces};
 
 pub use crate::state::AppState;
 
@@ -27,6 +27,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(vector::router())
         .merge(billing::router())
         .merge(realtime::router())
+        .merge(rest::router())
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit::middleware))
         .layer(middleware::from_fn_with_state(state.clone(), metrics::track))
         .layer(TraceLayer::new_for_http())

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 
-use crate::{config::AppConfig, metrics::Metrics, rate_limit::RateLimiter, realtime::RealtimeHub};
+use crate::{
+    config::AppConfig, metrics::Metrics, rate_limit::RateLimiter, realtime::RealtimeHub, rest::SchemaCache,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,6 +17,8 @@ pub struct AppState {
     /// Wakes background job workers immediately after a job is enqueued.
     pub jobs_notify: Arc<Notify>,
     pub metrics: Arc<Metrics>,
+    /// Column/type lookups for the generic REST API.
+    pub rest_cache: Arc<SchemaCache>,
 }
 
 impl AppState {
@@ -36,6 +40,7 @@ impl AppState {
             realtime: Arc::new(RealtimeHub::new()),
             jobs_notify: Arc::new(Notify::new()),
             metrics: Arc::new(Metrics::default()),
+            rest_cache: Arc::new(SchemaCache::default()),
         }
     }
 }

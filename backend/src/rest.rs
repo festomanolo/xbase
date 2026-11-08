@@ -42,7 +42,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::{
@@ -228,7 +228,7 @@ fn build_filters(
                     return Err(ApiError::bad_request(format!("in.(...) is not supported on array column '{name}'")));
                 }
                 binds.push(Bind::TextArray(parse_in_list(value)?));
-                let c = format!("{lhs} = any(($${n}::text[])::{}[])", col.ty).replace("$$", "$");
+                let c = format!("{lhs} = any((${n}::text[])::{}[])", col.ty);
                 if negate { format!("(not ({c}))") } else { format!("({c})") }
             }
             "like" | "ilike" => {
@@ -598,14 +598,10 @@ async fn delete_rows(
     Ok(Json(run(&state, &claims, &built, false).await?.0))
 }
 
-#[allow(dead_code)]
-fn _shape() -> serde_json::Value {
-    json!({})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn cols() -> Vec<Column> {
         [("id", "bigint"), ("title", "text"), ("done", "boolean"), ("tags", "text[]"), ("meta", "jsonb")]
