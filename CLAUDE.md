@@ -91,31 +91,14 @@ Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invit
 
 ---
 
-## What Is NOT Yet Implemented (Compared to Full Supabase)
+## Known Gaps / Next Steps
 
-### A. Missing in `xbase-backend` (Rust Service Layer)
-
-| Feature Area | Current Status | What Needs to Be Implemented |
-| :--- | :--- | :--- |
-| **1. Auth (GoTrue) Operations** | Only verifies existing Bearer JWTs (`backend/src/auth.rs`). | Sign-up, sign-in (email/password, magic link, OTP), OAuth provider callbacks, token refresh rotation, password reset, and Admin User CRUD (either via GoTrue HTTP proxy client or native Rust auth endpoints). |
-| **2. Database RLS Impersonation** | Queries run using the pool's connection role with manual `WHERE owner_id = $2` filters. | A transaction wrapper (`with_rls_claims(pool, claims, ...)`) that executes `SET LOCAL role = 'authenticated'; SET LOCAL request.jwt.claims = '...';` so PostgreSQL natively enforces Supabase RLS policies on all queries. |
-| **3. Automated Migrations on Boot** | SQL migration file sits in `migrations/0001_init_multi_saas.sql`. | Wire `sqlx::migrate!("../migrations")` into `backend/src/main.rs` (using a direct port `5432` session connection at startup) to apply schema migrations automatically. |
-| **4. Storage (Buckets & Objects)** | Not implemented in Rust backend. | Rust client/endpoints for creating buckets, generating presigned upload/download URLs, multipart uploads, and image transformations against Supabase Storage API or S3/MinIO. |
-| **5. Realtime (WebSockets / Presence / CDC)** | Handled externally by the Supabase Realtime container. | Native Axum WebSocket endpoints (`/ws`), room broadcast channels, presence tracking, and Postgres `LISTEN/NOTIFY` or logical replication (`pgoutput`) change streams. |
-| **6. Dynamic REST / GraphQL CRUD** | Only explicit typed routes exist in `backend/src/routes.rs`. | CRUD endpoints for creating/updating/deleting workspaces, memberships, invitations, and per-SaaS domain entities (or dynamic PostgREST-style query builders). |
-| **7. Billing & Webhooks (Edge Functions)** | Not implemented. | Stripe / LemonSqueezy webhook signature verification (`/webhooks/stripe`), subscription state syncing into `xbase.workspaces.plan`, and background job workers. |
-| **8. Vector / AI (`pgvector`)** | Not included in `backend/Cargo.toml`. | `pgvector` crate integration for storing and querying OpenAI/local embeddings per SaaS tenant. |
-| **9. Rate Limiting & API Keys** | Only JWT Bearer auth is supported. | Per-tenant/per-IP token-bucket rate limiting (`tower-governor`) and hashed API key authentication (`x-api-key`) for server-to-server SaaS integrations. |
-
----
-
-### B. Missing in Self-Hosted Supabase (Docker) vs. Supabase Cloud
-
-When running the official self-hosted Supabase Docker stack (`scripts/bootstrap-supabase.sh`), the following **Supabase Cloud** control-plane features are not included out of the box and must be added if needed:
-
-1. **Multi-Project Studio UI**: Self-hosted Supabase Studio manages a single PostgreSQL cluster. Hosting 10 SaaS apps requires logical separation (`app_slug` column or separate PostgreSQL schemas like `saas_1`, `saas_2`) rather than separate projects in Studio.
-2. **Production SMTP Delivery**: Self-hosted GoTrue uses a local fake/Inbucket mail catcher by default. Production requires configuring `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_ADMIN_EMAIL` (e.g., Resend, AWS SES, Postmark) in `supabase-project/.env`.
-3. **Automated Backups & Point-in-Time Recovery (PITR)**: No built-in cloud backup scheduler. Requires a cron/systemd timer running `pg_dump` or `WAL-G` / `pgBackRest` shipping encrypted backups to S3 / Cloudflare R2 / Backblaze B2.
-4. **Database Branching**: Ephemeral preview branches per Git pull request are not built into the self-hosted stack.
-5. **Log Drains & Metrics Alerting**: Vector/Logflare is included for basic Studio logs, but Prometheus/Grafana alerting for VPS disk, RAM, and container health must be configured separately.
-6. **Custom OAuth & SAML Configuration UI**: OAuth providers (Google, GitHub, Apple, etc.) must be enabled via environment variables (`GOTRUE_EXTERNAL_<PROVIDER>_ENABLED=true`) in `supabase-project/.env` rather than toggled in the Studio UI.
+| Area | Gap |
+| :--- | :--- |
+| Horizontal scaling | Realtime hub and rate limiter are in-memory per process. Running >1 replica of the same SaaS needs room fan-out over `NOTIFY` (or Redis) and a shared limiter. |
+| Storage via API keys | Storage endpoints accept user JWTs only (Storage RLS needs a user identity). |
+| Dynamic REST | No PostgREST-style query builder in Rust; the Supabase PostgREST container already serves `/rest/v1` for generic CRUD. |
+| PITR | Nightly logical dumps only (24h RPO). Add WAL-G/pgBackRest WAL archiving for point-in-time recovery. |
+| Go template parity | Go service covers health, me, workspaces, API-key auth and rate limiting — not storage/realtime/billing/vector. |
+| Storage policies | Create `storage.objects` RLS policies per bucket (e.g. `(storage.foldername(name))[1] = auth.uid()::text`) — not shipped as migrations because buckets are app-specific. |
+| Multi-project Studio | Self-hosted Studio manages one cluster; isolation is logical (`app_slug` / per-SaaS schemas). |
