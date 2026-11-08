@@ -207,7 +207,8 @@ cmd_prune() {
   local wal_hours=$(( (now - $(stamp_to_epoch "$oldest_kept")) / 3600 + 24 ))
   # (skip while no WAL has been shipped yet: rclone errors on a missing directory)
   if rclone lsf "$REMOTE/wal" >/dev/null 2>&1; then
-  rclone delete "$REMOTE/wal" --min-age "${wal_hours}h" || true
+    rclone delete "$REMOTE/wal" --min-age "${wal_hours}h" || true
+  fi
 }
 
 # --- status -------------------------------------------------------------------
