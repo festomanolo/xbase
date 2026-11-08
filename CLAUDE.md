@@ -37,20 +37,15 @@ xbase/
 │   └── routes.rs     # build_router + HTTP tests
 ├── go-backend/                        # Go template: net/http + pgx (QueryExecModeExec), WithRLS, API keys, rate limit
 ├── docker/
-│   ├── docker-compose.saas.yml        # Multi-SaaS Rust containers + Caddy reverse proxy stack
-│   └── Caddyfile                      # Automatic Let's Encrypt HTTPS routing for Kong & SaaS APIs
-├── migrations/
-│   └── 0001_init_multi_saas.sql       # Multi-SaaS schema (xbase.apps, xbase.workspaces) + RLS
-└── backend/                           # Rust (Axum 0.7 + SQLx 0.8 + Tokio) backend service
-    ├── Cargo.toml
-    ├── Dockerfile                     # Multi-stage Debian bookworm-slim build
-    ├── .env.example
-    └── src/
-        ├── main.rs                    # Entrypoint, tracing, CORS, graceful shutdown
-        ├── config.rs                  # Environment config loader (AppConfig)
-        ├── db.rs                      # Supavisor PgPool builder (statement_cache_capacity(0))
-        ├── auth.rs                    # Local HS256 Supabase JWT extractor (SupabaseClaims)
-        └── routes.rs                  # HTTP routes (/health, /health/db, /api/v1/me, /api/v1/tenants/:app_slug)
+│   ├── docker-compose.saas.yml        # Rust saas-api-1 + Go saas-api-2 + Caddy (build context = repo root)
+│   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
+│   ├── supabase-auth.override.yml     # GoTrue OAuth/SAML/SMTP env layer
+│   ├── monitoring/                    # prometheus.yml, alerts.yml, alertmanager.yml, grafana datasource
+│   └── Caddyfile
+└── scripts/
+    ├── bootstrap-supabase.sh          # clone + upstream generate-keys.sh (ANON/SERVICE keys match JWT_SECRET)
+    ├── backup-postgres.sh / restore-postgres.sh / install-backups.sh
+    └── db-branch.sh                   # branch_<name> databases for previews
 ```
 
 ---
