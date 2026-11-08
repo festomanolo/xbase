@@ -64,7 +64,9 @@ xbase/
 ./scripts/bootstrap-supabase.sh                       # Supabase docker + secrets
 cd backend && cargo test                              # Rust unit + HTTP tests (no DB needed)
 cd backend && cp .env.example .env && cargo run       # needs DATABASE_URL + DIRECT_DATABASE_URL
-cd go-backend && go test ./...                        # Go tests
+cd go-backend && go test -race ./...                  # Go tests (WebSocket + storage proxy use in-process fakes)
+sudo ./scripts/install-pitr.sh && sudo xbase-pitr status   # point-in-time recovery (see README → Operations)
+./scripts/apply-storage-policies.sh                   # only if migration 0005 printed "skipped storage.objects policies"
 docker build -f backend/Dockerfile .                  # Rust image: build context MUST be repo root
 cd docker && docker compose --env-file ../supabase-project/.env -f docker-compose.saas.yml up -d --build
 ```
