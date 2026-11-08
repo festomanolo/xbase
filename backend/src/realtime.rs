@@ -376,8 +376,73 @@ fn local_presence(room: &Room) -> serde_json::Map<String, Value> {
                 .as_ref()
                 .map(|p| (id.to_string(), json!({ "user_id": m.user_id, "state": p })))
         })
-        .collect();
+        .collect()
+}
+
+/// Local plus replicated presence.
+fn presence_snapshot(room: &Room) -> Value {
+    let mut presences = local_presence(room);
+    for (id, e) in &room.remote {
+        presences.insert(id.clone(), json!({ "user_id": e.user_id, "state": e.state }));
+    }
     Value::Object(presences)
+}
+
+fn parse_presence_entry(v: &Value) -> Option<(Uuid, Value)> {
+    let user_id = v["user_id"].as_str().and_then(|s| Uuid::parse_str(s).ok())?;
+    Some((user_id, v["state"].clone()))
+}
+
+/// Mirrors a remote `presence_diff` into the room's replicated presence.
+fn apply_remote_diff(room: &mut Room, origin: &str, msg: &Value) {
+    if let Some(leaves) = msg["leaves"].as_object() {
+        for key in leaves.keys() {
+            room.remote.remove(key);
+        }
+    }
+    if let Some(joins) = msg["joins"].as_object() {
+        for (key, v) in joins {
+            if let Some((user_id, state)) = parse_presence_entry(v) {
+                room.remote.insert(
+                    key.clone(),
+                    RemoteEntry { origin: origin.to_string(), user_id, state, seen: Instant::now() },
+                );
+            }
+        }
+    }
+}
+
+/// Replaces everything `origin` holds in the room with its full `presence` and
+/// tells local members what changed.
+fn apply_remote_sync(room: &mut Room, name: &str, origin: &str, presence: serde_json::Map<String, Value>) {
+    let mut joins = serde_json::Map::new();
+    let mut leaves = serde_json::Map::new();
+
+    let gone: Vec<String> = room
+        .remote
+        .iter()
+        .filter(|(k, e)| e.origin == origin && !presence.contains_key(*k))
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in gone {
+        if let Some(e) = room.remote.remove(&key) {
+            leaves.insert(key, json!({ "user_id": e.user_id, "state": e.state }));
+        }
+    }
+    for (key, v) in presence {
+        let Some((user_id, state)) = parse_presence_entry(&v) else { continue };
+        let changed = room.remote.get(&key).is_none_or(|e| e.state != state);
+        room.remote.insert(
+            key.clone(),
+            RemoteEntry { origin: origin.to_string(), user_id, state, seen: Instant::now() },
+        );
+        if changed {
+            joins.insert(key, v);
+        }
+    }
+    if !joins.is_empty() || !leaves.is_empty() {
+        fan_out(room, None, &json!({ "type": "presence_diff", "room": name, "joins": joins, "leaves": leaves }));
+    }
 }
 
 /// Non-blocking fan-out; slow consumers drop messages instead of stalling the room.
@@ -580,6 +645,9 @@ async fn handle_client_msg(
                 "type": "broadcast", "room": room, "event": event,
                 "payload": payload, "from": conn.claims.sub
             });
+            if hub.cluster_enabled() && msg.to_string().len() > MAX_CLUSTER_BYTES {
+                return err("message too large for clustered realtime (max 7000 bytes)");
+            }
             if hub.broadcast(&room, conn.id, &msg) { None } else { err("join the room first") }
         }
         ClientMsg::Track { room, state } => {
