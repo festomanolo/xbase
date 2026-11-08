@@ -3,15 +3,20 @@
 //! * Bucket management uses the service role key and requires an admin caller.
 //! * Object operations forward the caller's own JWT, so Storage's RLS policies
 //!   on `storage.objects` decide access — identical to Supabase Cloud.
+//! * API keys (`x-api-key`, scopes `storage:read` / `storage:write`) are also
+//!   accepted: Storage then runs with the service role, so the key is confined
+//!   *by this proxy* to objects under `<its workspace id>/`. That is the same
+//!   layout the `storage.objects` policies (migration 0005) use for users.
 //! * Buckets are namespaced per SaaS (`<APP_ID>-<name>`) so ten apps can share
 //!   one Storage service without seeing each other's files.
 //! * Large uploads use the TUS resumable protocol (`/uploads/resumable`), and
 //!   image transformations are applied through signed render URLs.
 
 use axum::{
+    async_trait,
     body::Body,
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, Method, StatusCode},
+    extract::{FromRequestParts, Path, Query, State},
+    http::{header, request::Parts, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
