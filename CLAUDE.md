@@ -21,7 +21,7 @@ xbase/
 ├── backend/src/                       # Rust (Axum 0.7 + SQLx 0.8 + Tokio)
 │   ├── main.rs       # boot: migrations → pool → register app → job workers → CDC listener → serve
 │   ├── config.rs     # AppConfig (all env vars; AppConfig::for_tests())
-│   ├── state.rs      # AppState { pool, config, http, realtime, limiter, jobs_notify, metrics }
+│   ├── state.rs      # AppState { pool, config, http, realtime, limiter, jobs_notify, metrics, rest_cache }
 │   ├── error.rs      # ApiError (sqlx/reqwest mapping: 23505→409, 42501→403, P0001→400 ...)
 │   ├── db.rs         # Supavisor pool (statement_cache_capacity(0)), run_migrations, register_app
 │   ├── rls.rs        # begin_rls / with_rls_claims (set_config role + request.jwt.claims, tx-local)
