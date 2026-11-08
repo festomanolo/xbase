@@ -601,6 +601,7 @@ async fn delete_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn cols() -> Vec<Column> {
         [("id", "bigint"), ("title", "text"), ("done", "boolean"), ("tags", "text[]"), ("meta", "jsonb")]
