@@ -98,6 +98,11 @@ cd docker && docker compose --env-file ../supabase-project/.env -f docker-compos
 - [x] Billing: Stripe + LemonSqueezy webhook verification, idempotent event log, plan/status/period sync; durable background job queue.
 - [x] pgvector embeddings with server-side embedding (OpenAI-compatible), metadata filters, reindex job.
 - [x] Per-key/user/IP token-bucket rate limiting; hashed scoped API keys (`x-api-key`).
+- [x] **Horizontal scaling:** `RATE_LIMIT_BACKEND=postgres` shares one token bucket per key across replicas (atomic upsert in `xbase.rate_limit_check`, 250 ms budget, falls back to the local bucket); `REALTIME_CLUSTER=true` replays broadcast + presence to other replicas over `NOTIFY xbase_rt_<app>` (presence diffs + 30 s sync + 90 s expiry). Metrics: `xbase_rate_limit_fallbacks_total`, `xbase_realtime_cluster_messages_total`.
+- [x] **Storage via API keys** (`storage:read` / `storage:write`, confined to `<workspace_id>/`) and **storage policies** (migration 0005 + `scripts/apply-storage-policies.sh`): workspace members read, owner/admin/member write.
+- [x] **REST:** `/api/v1/rest/:table` with select/filters (`eq neq gt gte lt lte like ilike is in not.`)/order/limit/offset, insert (batch + upsert), PATCH, DELETE, `Prefer: count=exact`. Opt-in with `REST_ENABLED=true`.
+- [x] **PITR:** WAL archiving override + `pitr.sh` (ship-wal, base-backup, prune, status, restore into a throwaway container); everything encrypted before upload.
+- [x] **Go parity:** storage, vector (no reindex job), billing (plan sync inline in the webhook transaction), realtime incl. cluster mode, shared rate limiter, `/metrics`, service-role admin gate.
 - [x] Prometheus `/metrics`; Go backend template; ops: secrets bootstrap (fixed ANON/SERVICE key mismatch), SMTP/OAuth/SAML override, encrypted backups + restore + systemd timer, DB branching, monitoring + alerts.
 
 Verified end-to-end against `supabase/postgres:17.6.1.136` (RLS isolation, invitations, API keys, vector search, Stripe→plan sync, realtime presence/broadcast/CDC, backup→restore round-trip, branching).
