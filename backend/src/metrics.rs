@@ -14,6 +14,7 @@ use crate::{auth::bearer_token, state::AppState};
 
 #[derive(Default)]
 pub struct Metrics {
+    pub requests_1xx: AtomicU64,
     pub requests_2xx: AtomicU64,
     pub requests_3xx: AtomicU64,
     pub requests_4xx: AtomicU64,
@@ -34,6 +35,7 @@ pub async fn track(State(state): State<AppState>, req: Request, next: Next) -> R
     m.latency_micros_sum
         .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
     let counter = match resp.status().as_u16() {
+        100..=199 => &m.requests_1xx, // WebSocket upgrades (101)
         200..=299 => &m.requests_2xx,
         300..=399 => &m.requests_3xx,
         400..=499 => &m.requests_4xx,
@@ -52,11 +54,12 @@ pub async fn render(State(state): State<AppState>, headers: axum::http::HeaderMa
     let m = &state.metrics;
     let app = &state.config.app_id;
     let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
-    let total = g(&m.requests_2xx) + g(&m.requests_3xx) + g(&m.requests_4xx) + g(&m.requests_5xx);
+    let total = g(&m.requests_1xx) + g(&m.requests_2xx) + g(&m.requests_3xx) + g(&m.requests_4xx) + g(&m.requests_5xx);
     let pool = &state.pool;
 
     let body = format!(
         "# TYPE xbase_http_requests_total counter\n\
+xbase_http_requests_total{{app=\"{app}\",class=\"1xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"2xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"3xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"4xx\"}} {}\n\
@@ -78,6 +81,7 @@ xbase_ws_rooms{{app=\"{app}\"}} {}\n\
 # TYPE xbase_db_pool_connections gauge\n\
 xbase_db_pool_connections{{app=\"{app}\",state=\"total\"}} {}\n\
 xbase_db_pool_connections{{app=\"{app}\",state=\"idle\"}} {}\n",
+        g(&m.requests_1xx),
         g(&m.requests_2xx),
         g(&m.requests_3xx),
         g(&m.requests_4xx),
