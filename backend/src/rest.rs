@@ -388,8 +388,12 @@ pub fn build_insert(
     };
 
     let mut groups: Vec<(Vec<&Column>, Vec<Value>)> = Vec::new();
-            let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
-            let updates: Vec<String> = used
+    for row in rows {
+        let used: Vec<&Column> = cols.iter().filter(|c| row.contains_key(&c.name)).collect();
+        if used.is_empty() {
+            return Err(ApiError::bad_request("Every row must set at least one column"));
+        }
+        let value = Value::Object(row.clone());
                 .iter()
                 .filter(|c| !keys.contains(&c.name))
                 .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
