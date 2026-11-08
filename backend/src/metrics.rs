@@ -59,6 +59,7 @@ pub async fn render(State(state): State<AppState>, headers: axum::http::HeaderMa
 
     let body = format!(
         "# TYPE xbase_http_requests_total counter\n\
+xbase_http_requests_total{{app=\"{app}\",class=\"1xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"2xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"3xx\"}} {}\n\
 xbase_http_requests_total{{app=\"{app}\",class=\"4xx\"}} {}\n\
@@ -80,6 +81,7 @@ xbase_ws_rooms{{app=\"{app}\"}} {}\n\
 # TYPE xbase_db_pool_connections gauge\n\
 xbase_db_pool_connections{{app=\"{app}\",state=\"total\"}} {}\n\
 xbase_db_pool_connections{{app=\"{app}\",state=\"idle\"}} {}\n",
+        g(&m.requests_1xx),
         g(&m.requests_2xx),
         g(&m.requests_3xx),
         g(&m.requests_4xx),
