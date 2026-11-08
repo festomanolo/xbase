@@ -418,7 +418,10 @@ pub fn build_insert(
                     format!(" on conflict ({key_sql}) do nothing")
                 }
             }
-        }
+        };
+        binds.push(Bind::Json(Value::Array(group_rows)));
+        ctes.push(format!(
+            "i{n} as (insert into {target} ({names}) select {names} from jsonb_populate_recordset(null::{target}, ${}::jsonb){conflict} returning *)",
     };
 
     Ok(Built {
