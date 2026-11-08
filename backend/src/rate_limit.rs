@@ -100,6 +100,54 @@ impl RateLimiter {
     }
 }
 
+/// Budget for the shared check before falling back to the local bucket.
+const SHARED_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Atomic token-bucket step in Postgres. Keys are namespaced by `APP_ID` so ten
+/// SaaS apps sharing a database never share buckets.
+async fn shared_check(state: &AppState, key: &str) -> Result<Decision, sqlx::Error> {
+    let (allowed, remaining, retry_after): (bool, f64, f64) =
+        sqlx::query_as("select allowed, remaining, retry_after from xbase.rate_limit_check($1, $2, $3)")
+            .bind(format!("{}:{key}", state.config.app_id))
+            .bind(state.config.rate_limit_per_second)
+            .bind(state.config.rate_limit_burst)
+            .fetch_one(&state.pool)
+            .await?;
+    Ok(if allowed {
+        Decision::Allow { remaining: remaining.max(0.0) as u64 }
+    } else {
+        Decision::Deny { retry_after: Duration::from_secs_f64(retry_after.clamp(0.0, 3600.0)) }
+    })
+}
+
+/// Picks the backend; any shared-backend failure degrades to the local bucket.
+pub async fn decide(state: &AppState, key: &str) -> Decision {
+    if state.config.rate_limit_backend == RateLimitBackend::Postgres {
+        match tokio::time::timeout(SHARED_TIMEOUT, shared_check(state, key)).await {
+            Ok(Ok(decision)) => return decision,
+            Ok(Err(e)) => tracing::warn!(error = %e, "shared rate limiter failed; using local bucket"),
+            Err(_) => tracing::warn!("shared rate limiter timed out; using local bucket"),
+        }
+        state.metrics.rate_limit_fallbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    state.limiter.check(key)
+}
+
+/// Deletes shared buckets idle long enough to have refilled completely.
+pub async fn sweep_shared(state: &AppState) {
+    let idle_secs = (state.config.rate_limit_burst / state.config.rate_limit_per_second.max(0.001)) + 60.0;
+    if let Err(e) = sqlx::query(
+        "delete from xbase.rate_limits where key like $1 and updated_at < now() - make_interval(secs => $2)",
+    )
+    .bind(format!("{}:%", state.config.app_id) /* APP_ID is [a-z0-9-]: no LIKE escapes needed */)
+    .bind(idle_secs)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::debug!(error = %e, "shared rate-limit sweep failed");
+    }
+}
+
 fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trust_proxy: bool) -> String {
     if trust_proxy {
         let forwarded = headers
@@ -147,7 +195,7 @@ pub async fn middleware(State(state): State<AppState>, req: Request, next: Next)
     let key = rate_key(&state, req.headers(), peer);
     let limit = HeaderValue::from(state.limiter.burst());
 
-    match state.limiter.check(&key) {
+    match decide(&state, &key).await {
         Decision::Allow { remaining } => {
             let mut resp = next.run(req).await;
             let h = resp.headers_mut();
