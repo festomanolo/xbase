@@ -887,6 +887,21 @@ mod tests {
     }
 
     #[test]
+    fn envelope_wire_format_matches_go_backend() {
+        // Exact JSON the Go backend publishes (go-backend/internal/httpapi/realtime.go).
+        let sync: Envelope = serde_json::from_str(
+            r#"{"k":"sync","o":"abc","app":"app","room":"lobby","presence":{"1":{"user_id":"u","state":{"n":1}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(&sync, Envelope::Sync { presence, .. } if presence["1"]["user_id"] == "u"));
+        let req: Envelope = serde_json::from_str(r#"{"k":"req","o":"o","app":"app","room":"lobby"}"#).unwrap();
+        assert!(matches!(req, Envelope::Req { .. }));
+        // ...and what we publish round-trips with the same field names.
+        let out = serde_json::to_string(&Envelope::Req { o: "o".into(), app: "app".into(), room: "lobby".into() }).unwrap();
+        assert_eq!(out, r#"{"k":"req","o":"o","app":"app","room":"lobby"}"#);
+    }
+
+    #[test]
     fn channel_names_are_identifier_safe() {
         assert_eq!(room_channel("saas-app-1"), "xbase_rt_saas_app_1");
         assert!(room_channel(&"x".repeat(200)).len() <= 63);
