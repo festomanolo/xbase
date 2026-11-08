@@ -360,6 +360,12 @@ fn body_columns<'a>(cols: &'a [Column], rows: &[&serde_json::Map<String, Value>]
     Ok(used)
 }
 
+/// Rows are grouped by the exact set of keys they supply and each group becomes
+/// its own `INSERT` (chained as data-modifying CTEs, so still one statement and
+/// one transaction). A column a row does not mention therefore takes its DEFAULT
+/// instead of being forced to NULL, which a single `INSERT … SELECT cols` over
+/// rows with different keys would do. Response rows come back grouped, not in
+/// request order, when a batch mixes key sets.
 pub fn build_insert(
     schema: &str,
     table: &str,
