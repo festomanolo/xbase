@@ -405,8 +405,12 @@ pub fn build_insert(
         let names = used.iter().map(|c| q(&c.name)).collect::<Vec<_>>().join(", ");
         let conflict = match &conflict_keys {
             None => String::new(),
-            if merge && !updates.is_empty() {
-                format!(" on conflict ({key_sql}) do update set {}", updates.join(", "))
+            Some(keys) => {
+                let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
+                let updates: Vec<String> = used
+                    .iter()
+                    .filter(|c| !keys.contains(&c.name))
+                    .map(|c| format!("{0} = excluded.{0}", q(&c.name)))
             } else {
                 format!(" on conflict ({key_sql}) do nothing")
             }
