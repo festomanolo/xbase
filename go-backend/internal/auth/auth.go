@@ -39,11 +39,16 @@ func Verify(token, secret string) (*Claims, error) {
 	c.Subject, _ = mc["sub"].(string)
 	c.Email, _ = mc["email"].(string)
 	c.Role, _ = mc["role"].(string)
-	if c.Subject == "" || c.Role == "" {
+	// Supabase's anon / service_role API keys carry no `sub`. Only service_role
+	// is accepted without one (anon has no user identity).
+	if c.Role == "" || (c.Subject == "" && c.Role != "service_role") {
 		return nil, ErrInvalidToken
 	}
 	return c, nil
 }
+
+// IsServiceRole reports whether the token is a Supabase service_role key.
+func (c *Claims) IsServiceRole() bool { return c.Role == "service_role" }
 
 // BearerToken extracts the token from `Authorization: Bearer <token>`.
 func BearerToken(r *http.Request) string {

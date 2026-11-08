@@ -1,0 +1,33 @@
+# =============================================================================
+# Enables continuous WAL archiving on the self-hosted Supabase Postgres, the
+# first half of point-in-time recovery (scripts/pitr.sh is the other half).
+#
+#   docker compose -f docker-compose.yml -f ../docker/supabase-pitr.override.yml up -d db
+#
+# Needs a one-time Postgres RESTART (archive_mode cannot change at runtime).
+# Run scripts/install-pitr.sh first: it creates the host directory with the
+# right ownership. wal_level is deliberately NOT touched — Supabase already runs
+# `logical` for Realtime, which is a superset of what archiving needs.
+#
+# archive_command, in plain words:
+#   * segment not archived yet  → copy to <name>.tmp, then atomically rename
+#   * already archived, same bytes → success (Postgres retries after a crash)
+#   * already archived, DIFFERENT bytes → fail loudly instead of overwriting
+# =============================================================================
+services:
+  db:
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_min_messages=fatal
+      - -c
+      - archive_mode=on
+      # Worst-case data not yet archived. Lower = smaller RPO, more (16 MB) files.
+      - -c
+      - archive_timeout=60
+      - -c
+      - "archive_command=test -f /wal-archive/%f && cmp -s %p /wal-archive/%f || { test ! -f /wal-archive/%f && cp %p /wal-archive/%f.tmp && mv /wal-archive/%f.tmp /wal-archive/%f; }"
+    volumes:
+      - ${XBASE_WAL_DIR:-/var/lib/xbase/wal-archive}:/wal-archive

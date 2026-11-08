@@ -44,22 +44,12 @@ func run() error {
 	defer pool.Close()
 
 	limiter := ratelimit.New(cfg.RateLimitPerSecond, cfg.RateLimitBurst)
-	go func() {
-		t := time.NewTicker(time.Minute)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				limiter.Sweep()
-			}
-		}
-	}()
+	api := httpapi.New(cfg, pool, limiter)
+	api.StartBackground(ctx) // realtime listener, cluster fan-out, rate-limit sweeps
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:           httpapi.New(cfg, pool, limiter).Handler(),
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

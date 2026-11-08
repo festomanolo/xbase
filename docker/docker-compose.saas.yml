@@ -41,8 +41,16 @@ x-rust-env: &rust-env
   TRUST_PROXY_HEADERS: "true"
   RATE_LIMIT_PER_SECOND: "20"
   RATE_LIMIT_BURST: "60"
+  # memory = per-process buckets. Use `postgres` as soon as an app runs >1 replica
+  # (one shared bucket per key; falls back to local on a DB blip).
+  RATE_LIMIT_BACKEND: "${RATE_LIMIT_BACKEND:-memory}"
   JOBS_ENABLED: "true"
   REALTIME_ENABLED: "true"
+  # true when an app runs >1 replica: rooms/presence fan out through Postgres NOTIFY.
+  REALTIME_CLUSTER: "${REALTIME_CLUSTER:-false}"
+  # PostgREST-style CRUD at /api/v1/rest/:table (RLS-enforced). Off by default.
+  REST_ENABLED: "${REST_ENABLED:-false}"
+  REST_SCHEMAS: "${REST_SCHEMAS:-public}"
   RUST_LOG: "xbase_backend=info,tower_http=info"
 
 services:
@@ -76,7 +84,27 @@ services:
       EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
       METRICS_TOKEN: "${METRICS_TOKEN:-}"
 
-  # --- SaaS #2: Go (lean template, same DB conventions) ---------------------
+  # --- Horizontal scaling: a second replica of SaaS #1 ----------------------
+  # Same APP_ID, same image. Both replicas need the two cluster switches ON
+  # (set RATE_LIMIT_BACKEND=postgres and REALTIME_CLUSTER=true in the env file
+  # that compose reads), then add the replica to the Caddy upstream list.
+  #
+  # saas-api-1b:
+  #   <<: *rust-backend
+  #   container_name: xbase-saas-api-1b
+  #   environment:
+  #     <<: *rust-env
+  #     APP_ID: "saas-app-1"                     # identical to saas-api-1
+  #     RATE_LIMIT_BACKEND: "postgres"
+  #     REALTIME_CLUSTER: "true"
+  #     CORS_ALLOWED_ORIGINS: "https://app1.yourdomain.com"
+  #     STRIPE_WEBHOOK_SECRET: "${SAAS1_STRIPE_WEBHOOK_SECRET:-}"
+  #     STRIPE_PRICE_PLANS: "${SAAS1_STRIPE_PRICE_PLANS:-}"
+  #     EMBEDDING_API_URL: "${EMBEDDING_API_URL:-}"
+  #     EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+  #     METRICS_TOKEN: "${METRICS_TOKEN:-}"
+
+  # --- SaaS #2: Go (same feature set: storage, realtime, billing, vector) ---
   saas-api-2:
     build:
       context: ../go-backend
@@ -90,9 +118,23 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       DATABASE_URL: "postgres://postgres.${POOLER_TENANT_ID:-your-tenant-id}:${POSTGRES_PASSWORD}@supavisor:6543/postgres"
+      # Realtime LISTEN/NOTIFY needs the direct session connection
+      DIRECT_DATABASE_URL: "postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres"
       DB_MAX_CONNECTIONS: "5"
       SUPABASE_JWT_SECRET: "${JWT_SECRET}"
+      SUPABASE_URL: "http://kong:8000"
+      SUPABASE_PUBLIC_URL: "${API_EXTERNAL_URL:-http://localhost:8000}"
+      SUPABASE_ANON_KEY: "${ANON_KEY}"
+      SUPABASE_SERVICE_ROLE_KEY: "${SERVICE_ROLE_KEY}"
       CORS_ALLOWED_ORIGINS: "https://app2.yourdomain.com"
+      TRUST_PROXY_HEADERS: "true"
+      RATE_LIMIT_BACKEND: "${RATE_LIMIT_BACKEND:-memory}"
+      REALTIME_CLUSTER: "${REALTIME_CLUSTER:-false}"
+      STRIPE_WEBHOOK_SECRET: "${SAAS2_STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRICE_PLANS: "${SAAS2_STRIPE_PRICE_PLANS:-}"
+      EMBEDDING_API_URL: "${EMBEDDING_API_URL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      METRICS_TOKEN: "${METRICS_TOKEN:-}"
     expose:
       - "3000"
     networks:
@@ -101,7 +143,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 48M
+          memory: 64M
 
 networks:
   supabase_default:
