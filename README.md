@@ -52,6 +52,8 @@ xbase/
 │   ├── docker-compose.saas.yml        # Rust + Go SaaS backends + Caddy
 │   ├── docker-compose.monitoring.yml  # Prometheus, Alertmanager, Grafana, node-exporter, cAdvisor
 │   ├── supabase-auth.override.yml     # OAuth providers, SAML, SMTP tuning for GoTrue
+│   ├── supabase-pitr.override.yml     # WAL archiving for point-in-time recovery
+│   ├── storage-policies.sql           # storage.objects policies (superuser variant of migration 0005)
 │   ├── monitoring/                    # scrape config, alert rules, receivers
 │   └── Caddyfile
 └── scripts/
