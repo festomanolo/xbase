@@ -378,11 +378,10 @@ pub fn build_insert(
     body_columns(cols, &rows)?; // validates every key against the catalog
     let target = format!("{}.{}", q(schema), q(table));
 
-    let conflict = match on_conflict.filter(|c| !c.is_empty()) {
-        None => String::new(),
-        Some(list) => {
-            let keys = list
-                .split(',')
+    let conflict_keys: Option<Vec<String>> = match on_conflict.filter(|c| !c.is_empty()) {
+        None => None,
+        Some(list) => Some(
+            list.split(',')
                 .map(|c| find(cols, c.trim()).map(|c| c.name.clone()))
                 .collect::<ApiResult<Vec<_>>>()?;
             let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
