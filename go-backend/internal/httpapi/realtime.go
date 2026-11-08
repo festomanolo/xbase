@@ -44,8 +44,10 @@ const (
 	maxRoomsPerConn     = 50
 	maxMessageBytes     = 64 * 1024
 	outboundBuffer      = 256
-	maxClusterBytes     = 7000
-	maxEnvelopeBytes    = 7900
+	maxClusterBytes     = 256 * 1024 // largest broadcast accepted in cluster mode
+	maxEnvelopeBytes    = maxClusterBytes + 16*1024
+	notifyInlineBytes   = 7900 // larger envelopes are spilled to xbase.realtime_spill
+	spillRetention      = 2 * time.Minute
 	presenceSyncEvery   = 30 * time.Second
 	remotePresenceTTL   = 90 * time.Second
 	heartbeatEvery      = 25 * time.Second
@@ -86,7 +88,8 @@ type room struct {
 }
 
 type envelope struct {
-	K        string                    `json:"k"` // msg | sync | req
+	K        string                    `json:"k"`            // msg | sync | req | spill
+	ID       int64                     `json:"id,omitempty"` // spill: row in xbase.realtime_spill
 	O        string                    `json:"o"`
 	App      string                    `json:"app"`
 	Room     string                    `json:"room"`
@@ -466,6 +469,9 @@ func (s *Server) realtimeRoutes(mux *http.ServeMux) {
 // StartBackground launches the realtime listener / cluster tasks and the
 // periodic rate-limit sweep. It returns immediately; all goroutines stop with ctx.
 func (s *Server) StartBackground(ctx context.Context) {
+	if s.cfg.JobsEnabled {
+		s.startJobs(ctx)
+	}
 	go func() {
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
@@ -501,6 +507,8 @@ func (s *Server) StartBackground(ctx context.Context) {
 					return
 				case <-t.C:
 					s.hub.clusterTick()
+					_, _ = s.pool.Exec(ctx, "delete from xbase.realtime_spill where app_id = $1 and created_at < now() - make_interval(secs => $2)",
+						s.cfg.AppID, spillRetention.Seconds())
 				}
 			}
 		}()
@@ -518,8 +526,16 @@ func (s *Server) runClusterPublisher(ctx context.Context, out <-chan string) {
 		case <-ctx.Done():
 			return
 		case payload := <-out:
-			if _, err := s.pool.Exec(ctx, "select pg_notify($1, $2)", channel, payload); err != nil {
-				slog.Warn("cluster publish failed", "error", err)
+			var err error
+			if len(payload) <= notifyInlineBytes {
+				_, err = s.pool.Exec(ctx, "select pg_notify($1, $2)", channel, payload)
+			} else {
+				// claim-check: store the body and NOTIFY its id in one statement
+				_, err = s.pool.Exec(ctx, `with s as (insert into xbase.realtime_spill (app_id, body) values ($1, $2) returning id)
+					select pg_notify($3, json_build_object('k', 'spill', 'id', s.id)::text) from s`, s.cfg.AppID, payload, channel)
+			}
+			if err != nil {
+				slog.Warn("cluster publish failed", "error", err, "bytes", len(payload))
 			}
 		}
 	}
@@ -555,9 +571,21 @@ func (s *Server) runListener(ctx context.Context, channels []string) {
 				}
 				if n.Channel == cluster && s.hub.clusterEnabled() {
 					var env envelope
-					if json.Unmarshal([]byte(n.Payload), &env) == nil {
-						s.hub.applyRemote(env)
+					if json.Unmarshal([]byte(n.Payload), &env) != nil {
+						continue
 					}
+					if env.K == "spill" {
+						var body string
+						if err := conn.QueryRow(ctx, "select body from xbase.realtime_spill where id = $1", env.ID).Scan(&body); err != nil {
+							slog.Warn("could not read spilled cluster message", "id", env.ID, "error", err)
+							continue
+						}
+						env = envelope{}
+						if json.Unmarshal([]byte(body), &env) != nil {
+							continue
+						}
+					}
+					s.hub.applyRemote(env)
 					continue
 				}
 				var ev map[string]any
@@ -811,7 +839,7 @@ func (s *Server) handleClientMsg(ctx context.Context, c *wsConn, data []byte) ma
 		}
 		if h.clusterEnabled() {
 			if b, _ := json.Marshal(msg); len(b) > maxClusterBytes {
-				return wsErr("message too large for clustered realtime (max 7000 bytes)")
+				return wsErr("message too large for clustered realtime (max 262144 bytes)")
 			}
 		}
 		if !h.broadcast(m.Room, c, msg) {
@@ -821,7 +849,7 @@ func (s *Server) handleClientMsg(ctx context.Context, c *wsConn, data []byte) ma
 
 	case "track":
 		if h.clusterEnabled() && len(m.State) > maxClusterBytes/2 {
-			return wsErr("presence state too large for clustered realtime (max 3500 bytes)")
+			return wsErr("presence state too large for clustered realtime (max 131072 bytes)")
 		}
 		if !h.track(m.Room, c, decode(m.State), true) {
 			return wsErr("join the room first")
