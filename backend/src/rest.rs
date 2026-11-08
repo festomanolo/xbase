@@ -383,7 +383,11 @@ pub fn build_insert(
         Some(list) => Some(
             list.split(',')
                 .map(|c| find(cols, c.trim()).map(|c| c.name.clone()))
-                .collect::<ApiResult<Vec<_>>>()?;
+                .collect::<ApiResult<Vec<_>>>()?,
+        ),
+    };
+
+    let mut groups: Vec<(Vec<&Column>, Vec<Value>)> = Vec::new();
             let key_sql = keys.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ");
             let updates: Vec<String> = used
                 .iter()
