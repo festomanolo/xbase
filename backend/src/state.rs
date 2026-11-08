@@ -40,6 +40,7 @@ impl AppState {
             realtime: Arc::new(RealtimeHub::new()),
             jobs_notify: Arc::new(Notify::new()),
             metrics: Arc::new(Metrics::default()),
+            rest_cache: Arc::new(SchemaCache::default()),
         }
     }
 }
