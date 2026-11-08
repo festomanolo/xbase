@@ -50,7 +50,9 @@ xbase/
 │   └── Caddyfile
 └── scripts/
     ├── bootstrap-supabase.sh          # clone + upstream generate-keys.sh (ANON/SERVICE keys match JWT_SECRET)
-    ├── backup-postgres.sh / restore-postgres.sh / install-backups.sh
+    ├── backup-postgres.sh / restore-postgres.sh / install-backups.sh   # nightly logical dumps
+    ├── pitr.sh / install-pitr.sh      # WAL shipping + base backups + point-in-time restore rehearsal (RPO ≈ 1-2 min)
+    ├── apply-storage-policies.sh      # install storage.objects policies as supabase_admin
     └── db-branch.sh                   # branch_<name> databases for previews
 ```
 
