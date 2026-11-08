@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod rate_limit;
 pub mod realtime;
+pub mod rest;
 pub mod rls;
 pub mod routes;
 pub mod state;
